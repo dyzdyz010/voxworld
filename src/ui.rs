@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::raycast::HighlightState;
+use crate::voxel::WorldSeed;
 
 const UI_FONT_PATH: &str = "fonts/SourceHanSansSC-Regular.otf";
 const MENU_BG: Color = Color::srgba(0.08, 0.09, 0.12, 0.92);
@@ -29,6 +30,9 @@ struct ExitButton;
 #[derive(Component)]
 struct Crosshair;
 
+#[derive(Component)]
+struct SeedInfoText;
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -37,7 +41,7 @@ impl Plugin for UiPlugin {
             .add_systems(Startup, setup_ui)
             .add_systems(
                 Update,
-                (update_voxel_info, toggle_exit_menu, exit_button_system),
+                (update_voxel_info, update_seed_info, toggle_exit_menu, exit_button_system),
             );
     }
 }
@@ -66,6 +70,30 @@ fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             },
             TextColor(Color::WHITE),
             VoxelInfoText,
+        ));
+
+    // Seed info (top right)
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(14.0),
+                top: px(14.0),
+                width: px(180.0),
+                padding: UiRect::all(px(12.0)),
+                ..default()
+            },
+            BackgroundColor(INFO_BG),
+        ))
+        .with_child((
+            Text::new("种子: 加载中..."),
+            TextFont {
+                font: font.clone(),
+                font_size: 14.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.8, 0.85, 0.9)),
+            SeedInfoText,
         ));
 
     // 十字准星
@@ -204,6 +232,21 @@ fn update_voxel_info(
         None => "注视方块：无".to_string(),
     };
     text.0 = value;
+}
+
+fn update_seed_info(
+    seed: Res<WorldSeed>,
+    mut text_q: Query<&mut Text, With<SeedInfoText>>,
+    mut initialized: Local<bool>,
+) {
+    if *initialized {
+        return;
+    }
+    let Ok(mut text) = text_q.single_mut() else {
+        return;
+    };
+    text.0 = format!("种子: {}", seed.seed);
+    *initialized = true;
 }
 
 fn toggle_exit_menu(

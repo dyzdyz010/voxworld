@@ -1,8 +1,10 @@
+use bevy::anti_alias::fxaa::Fxaa;
 use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
-use bevy::light::{light_consts::lux, AtmosphereEnvironmentMapLight};
-use bevy::pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium};
+use bevy::light::{light_consts::lux, AtmosphereEnvironmentMapLight, VolumetricFog, VolumetricLight, CascadeShadowConfigBuilder};
+use bevy::pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium, ScreenSpaceReflections};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
@@ -42,38 +44,52 @@ fn setup_player(
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
 ) {
     let yaw = 0.0;
-    let pitch = -0.25;
-    let rotation =
-        Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, pitch);
+    let pitch = -0.15;
+    let rotation = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, pitch);
+
+    // Camera with atmosphere components
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 4.0, 12.0).with_rotation(rotation),
+        Transform::from_xyz(0.0, 50.0, 20.0).with_rotation(rotation),
         PlayerCamera,
         LookAngles { yaw, pitch },
+        // Earthlike atmosphere
         Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
         AtmosphereSettings::default(),
-        AtmosphereEnvironmentMapLight::default(),
+        // Exposure compensation for bright atmospheric lighting
         Exposure { ev100: 13.0 },
         Tonemapping::AcesFitted,
+        // Bloom gives the sun a much more natural look
+        Bloom::NATURAL,
+        // Enables the atmosphere to drive reflections and ambient lighting
+        AtmosphereEnvironmentMapLight::default(),
+        VolumetricFog {
+            ambient_intensity: 0.0,
+            ..default()
+        },
+        Msaa::Off,
+        Fxaa::default(),
+        ScreenSpaceReflections::default(),
     ));
 
+    // Configure cascade shadow map
+    let cascade_shadow_config = CascadeShadowConfigBuilder {
+        first_cascade_far_bound: 30.0,
+        maximum_distance: 500.0,
+        ..default()
+    }
+    .build();
+
+    // Sun - using RAW_SUNLIGHT for proper atmospheric scattering
     commands.spawn((
         DirectionalLight {
             illuminance: lux::RAW_SUNLIGHT,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(6.0, 10.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    commands.spawn((
-        PointLight {
-            intensity: 1600.0,
-            range: 40.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(-6.0, 6.0, -6.0),
+        Transform::from_xyz(50.0, 80.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+        VolumetricLight,
+        cascade_shadow_config,
     ));
 
     cursor_options.grab_mode = CursorGrabMode::Locked;
@@ -97,8 +113,7 @@ fn player_look(
         return;
     };
     angles.yaw -= delta.x * settings.look_sensitivity;
-    angles.pitch = (angles.pitch - delta.y * settings.look_sensitivity)
-        .clamp(-1.54, 1.54);
+    angles.pitch = (angles.pitch - delta.y * settings.look_sensitivity).clamp(-1.54, 1.54);
     let yaw = Quat::from_axis_angle(Vec3::Y, angles.yaw);
     let pitch = Quat::from_axis_angle(Vec3::X, angles.pitch);
     transform.rotation = yaw * pitch;

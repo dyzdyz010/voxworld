@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::player::PlayerCamera;
-use crate::voxel::{ivec3_to_vec3, VoxelKind, VoxelWorld};
+use crate::voxel::{ivec3_to_vec3, VoxelKind, VoxelWorld, CHUNK_HEIGHT};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelHit {
@@ -24,65 +24,108 @@ impl Plugin for RaycastPlugin {
     }
 }
 
+/// DDA (Digital Differential Analyzer) voxel raycast algorithm
+/// Much more efficient than testing every voxel
 fn raycast_voxels(
     world: Res<VoxelWorld>,
     camera_q: Query<&GlobalTransform, With<PlayerCamera>>,
     mut highlight: ResMut<HighlightState>,
 ) {
     let Ok(camera_transform) = camera_q.single() else {
+        highlight.current = None;
         return;
     };
+
     let origin = camera_transform.translation();
     let dir = camera_transform.forward().as_vec3();
-    let max_dist = 10.0;
+    let max_dist = 8.0;
 
-    let mut best_hit: Option<VoxelHit> = None;
-    for (pos, kind) in world.map.iter() {
-        let center = ivec3_to_vec3(*pos);
-        let min = center - Vec3::splat(0.5);
-        let max = center + Vec3::splat(0.5);
-        if let Some(t) = ray_aabb(origin, dir, min, max) {
-            if t >= 0.0 && t <= max_dist {
-                let replace = match best_hit {
-                    Some(hit) => t < hit.distance,
-                    None => true,
-                };
-                if replace {
-                    best_hit = Some(VoxelHit {
-                        pos: *pos,
-                        kind: *kind,
-                        distance: t,
-                    });
-                }
+    highlight.current = dda_raycast(&world, origin, dir, max_dist);
+}
+
+/// Fast voxel traversal using DDA algorithm
+fn dda_raycast(world: &VoxelWorld, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<VoxelHit> {
+    // Current voxel position
+    let mut pos = IVec3::new(
+        origin.x.floor() as i32,
+        origin.y.floor() as i32,
+        origin.z.floor() as i32,
+    );
+
+    // Direction to step in each axis
+    let step = IVec3::new(
+        if dir.x >= 0.0 { 1 } else { -1 },
+        if dir.y >= 0.0 { 1 } else { -1 },
+        if dir.z >= 0.0 { 1 } else { -1 },
+    );
+
+    // Distance along ray to cross one voxel in each axis
+    let delta = Vec3::new(
+        if dir.x.abs() < 1e-10 { f32::MAX } else { (1.0 / dir.x).abs() },
+        if dir.y.abs() < 1e-10 { f32::MAX } else { (1.0 / dir.y).abs() },
+        if dir.z.abs() < 1e-10 { f32::MAX } else { (1.0 / dir.z).abs() },
+    );
+
+    // Distance to next voxel boundary in each axis
+    let mut t_max = Vec3::new(
+        if dir.x >= 0.0 {
+            ((pos.x + 1) as f32 - origin.x) * delta.x
+        } else {
+            (origin.x - pos.x as f32) * delta.x
+        },
+        if dir.y >= 0.0 {
+            ((pos.y + 1) as f32 - origin.y) * delta.y
+        } else {
+            (origin.y - pos.y as f32) * delta.y
+        },
+        if dir.z >= 0.0 {
+            ((pos.z + 1) as f32 - origin.z) * delta.z
+        } else {
+            (origin.z - pos.z as f32) * delta.z
+        },
+    );
+
+    let mut distance = 0.0;
+
+    while distance < max_dist {
+        // Check bounds
+        if pos.y < 0 || pos.y >= CHUNK_HEIGHT {
+            // Step to next voxel anyway
+        } else {
+            // Check current voxel
+            let kind = world.get_voxel(pos);
+            if kind != VoxelKind::Air && kind.is_solid() {
+                return Some(VoxelHit {
+                    pos,
+                    kind,
+                    distance,
+                });
             }
+        }
+
+        // Move to next voxel (step along the axis with smallest t_max)
+        if t_max.x < t_max.y && t_max.x < t_max.z {
+            distance = t_max.x;
+            t_max.x += delta.x;
+            pos.x += step.x;
+        } else if t_max.y < t_max.z {
+            distance = t_max.y;
+            t_max.y += delta.y;
+            pos.y += step.y;
+        } else {
+            distance = t_max.z;
+            t_max.z += delta.z;
+            pos.z += step.z;
         }
     }
 
-    highlight.current = best_hit;
+    None
 }
 
 fn draw_highlight_gizmo(mut gizmos: Gizmos, highlight: Res<HighlightState>) {
     if let Some(hit) = highlight.current {
-        let center = ivec3_to_vec3(hit.pos);
+        let center = ivec3_to_vec3(hit.pos) + Vec3::splat(0.5);
         let transform = Transform::from_translation(center).with_scale(Vec3::splat(1.02));
         gizmos.cube(transform, Color::srgb(1.0, 0.95, 0.2));
-    }
-}
-
-fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
-    let inv_dir = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
-    let t1 = (min - origin) * inv_dir;
-    let t2 = (max - origin) * inv_dir;
-
-    let t_min = Vec3::new(t1.x.min(t2.x), t1.y.min(t2.y), t1.z.min(t2.z));
-    let t_max = Vec3::new(t1.x.max(t2.x), t1.y.max(t2.y), t1.z.max(t2.z));
-
-    let t_near = t_min.x.max(t_min.y).max(t_min.z);
-    let t_far = t_max.x.min(t_max.y).min(t_max.z);
-
-    if t_far >= t_near {
-        Some(t_near)
-    } else {
-        None
     }
 }

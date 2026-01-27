@@ -1393,7 +1393,7 @@ impl Default for ChunkLoadQueue {
             to_load: Vec::new(),
             to_unload: Vec::new(),
             active_tasks: 0,
-            max_concurrent_tasks: 64,
+            max_concurrent_tasks: 16, // 优化: 从64降低到16，减少线程竞争和CPU压力
             pending_placeholders: Vec::new(),
         }
     }
@@ -1446,9 +1446,54 @@ fn setup_materials(mut commands: Commands, mut materials: ResMut<Assets<Standard
     commands.insert_resource(ChunkMaterials { opaque, transparent });
 }
 
+/// 检查区块是否在摄像机视野内
+/// 使用简化的视锥剔除算法，基于摄像机朝向和视角范围
+///
+/// # 参数
+/// * `chunk_pos` - 区块位置
+/// * `camera_transform` - 摄像机的Transform（包含位置和旋转）
+///
+/// # 返回值
+/// 如果区块在视野内返回 true
+fn is_chunk_in_frustum(chunk_pos: &ChunkPos, camera_transform: &Transform) -> bool {
+    let origin = chunk_pos.world_origin();
+
+    // 计算区块中心点（世界坐标）
+    let chunk_center = Vec3::new(
+        origin.x as f32 + CHUNK_SIZE as f32 / 2.0,
+        CHUNK_HEIGHT as f32 / 2.0,
+        origin.z as f32 + CHUNK_SIZE as f32 / 2.0,
+    );
+
+    // 计算从摄像机到区块中心的向量
+    let to_chunk = chunk_center - camera_transform.translation;
+    let distance = to_chunk.length();
+
+    // 如果距离太近，总是加载（避免摄像机内部的区块被剔除）
+    if distance < CHUNK_SIZE as f32 * 2.0 {
+        return true;
+    }
+
+    // 获取摄像机的前向向量
+    let camera_forward = camera_transform.forward();
+
+    // 计算摄像机前向向量与到区块向量的夹角
+    let direction_normalized = to_chunk.normalize();
+    let dot_product = camera_forward.dot(direction_normalized);
+
+    // 视野角度约110度（FOV），cos(110°/2) ≈ cos(55°) ≈ 0.57
+    // 使用更宽的角度（130度）以包含边缘区块，避免误剔除
+    // cos(130°/2) = cos(65°) ≈ 0.42
+    const FOV_COS_THRESHOLD: f32 = 0.35;
+
+    // 如果夹角在视野范围内，返回 true
+    dot_product > FOV_COS_THRESHOLD
+}
+
 /// 更新区块加载系统
 /// 根据摄像机位置决定哪些区块需要加载或卸载
 /// 按距离排序：距离近的优先加载
+/// 优化: 添加视锥剔除，只加载视野内的区块
 fn update_chunk_loading(
     camera_query: Query<&Transform, With<Camera3d>>,
     world: Res<VoxelWorld>,
@@ -1470,6 +1515,12 @@ fn update_chunk_loading(
     for dx in -RENDER_DISTANCE..=RENDER_DISTANCE {
         for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
             let chunk_pos = ChunkPos::new(center_chunk.x + dx, center_chunk.z + dz);
+
+            // 优化: 视锥剔除 - 跳过视野外的区块
+            if !is_chunk_in_frustum(&chunk_pos, camera_transform) {
+                continue;
+            }
+
             if !world.loaded_chunks.contains_key(&chunk_pos)
                 && !world.chunks.contains_key(&chunk_pos)
                 && !queue.to_load.contains(&chunk_pos)

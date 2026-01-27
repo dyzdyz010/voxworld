@@ -18,6 +18,11 @@ pub struct MenuState {
     pub open: bool,
 }
 
+#[derive(Resource, Default)]
+pub struct DebugOverlayState {
+    pub visible: bool,
+}
+
 #[derive(Component)]
 pub struct VoxelInfoText;
 
@@ -33,15 +38,29 @@ struct Crosshair;
 #[derive(Component)]
 struct SeedInfoText;
 
+#[derive(Component)]
+struct DebugOverlay;
+
+#[derive(Component)]
+struct DebugText;
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuState>()
+            .init_resource::<DebugOverlayState>()
             .add_systems(Startup, setup_ui)
             .add_systems(
                 Update,
-                (update_voxel_info, update_seed_info, toggle_exit_menu, exit_button_system),
+                (
+                    update_voxel_info,
+                    update_seed_info,
+                    toggle_exit_menu,
+                    exit_button_system,
+                    toggle_debug_overlay,
+                    update_debug_overlay,
+                ),
             );
     }
 }
@@ -94,6 +113,31 @@ fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             },
             TextColor(Color::srgb(0.8, 0.85, 0.9)),
             SeedInfoText,
+        ));
+
+    // Debug Overlay (top left, initially hidden)
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(10.0),
+                top: px(10.0),
+                padding: UiRect::all(px(8.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            Visibility::Hidden,
+            DebugOverlay,
+        ))
+        .with_child((
+            Text::new("Debug Info"),
+            TextFont {
+                font: font.clone(),
+                font_size: 14.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            DebugText,
         ));
 
     // 十字准星
@@ -309,4 +353,81 @@ fn exit_button_system(
             }
         }
     }
+}
+
+fn toggle_debug_overlay(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut debug_state: ResMut<DebugOverlayState>,
+    mut overlay_q: Query<&mut Visibility, With<DebugOverlay>>,
+) {
+    if !keys.just_pressed(KeyCode::F3) {
+        return;
+    }
+
+    debug_state.visible = !debug_state.visible;
+    let Ok(mut visibility) = overlay_q.single_mut() else {
+        return;
+    };
+
+    *visibility = if debug_state.visible {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+}
+
+fn update_debug_overlay(
+    debug_state: Res<DebugOverlayState>,
+    mut text_q: Query<&mut Text, With<DebugText>>,
+    camera_q: Query<(&Transform, &crate::player::LookAngles), With<crate::player::PlayerCamera>>,
+    world: Res<crate::voxel::VoxelWorld>,
+    time: Res<Time>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+) {
+    if !debug_state.visible {
+        return;
+    }
+
+    let Ok(mut text) = text_q.single_mut() else {
+        return;
+    };
+
+    let Ok((transform, angles)) = camera_q.single() else {
+        return;
+    };
+
+    let pos = transform.translation;
+    let chunk_pos = crate::voxel::ChunkPos::from_world_pos(pos.x as i32, pos.z as i32);
+
+    // Get FPS from diagnostics
+    let fps = diagnostics
+        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|fps| fps.smoothed())
+        .unwrap_or(0.0);
+
+    text.0 = format!(
+        "Voxworld Debug (F3 to toggle)\n\
+        \n\
+        FPS: {:.1}\n\
+        Frame Time: {:.2}ms\n\
+        \n\
+        Position: {:.2}, {:.2}, {:.2}\n\
+        Chunk: ({}, {})\n\
+        \n\
+        Rotation:\n\
+          Yaw: {:.2}°\n\
+          Pitch: {:.2}°\n\
+        \n\
+        World:\n\
+          Loaded Chunks: {}\n\
+          Total Chunks: {}",
+        fps,
+        time.delta_secs() * 1000.0,
+        pos.x, pos.y, pos.z,
+        chunk_pos.x, chunk_pos.z,
+        angles.yaw.to_degrees(),
+        angles.pitch.to_degrees(),
+        world.loaded_chunks.len(),
+        world.chunks.len(),
+    );
 }

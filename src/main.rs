@@ -5,6 +5,7 @@ mod voxel;
 
 use std::f32::consts::PI;
 
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::keyboard::KeyCode;
 use bevy::pbr::{AtmosphereMode, AtmosphereSettings};
 use bevy::prelude::*;
@@ -33,14 +34,28 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((VoxelPlugin, PlayerPlugin, RaycastPlugin, UiPlugin))
+        .add_plugins((
+            VoxelPlugin,
+            PlayerPlugin,
+            RaycastPlugin,
+            UiPlugin,
+            FrameTimeDiagnosticsPlugin::default(),
+        ))
         .add_systems(Startup, print_controls)
         .add_systems(Update, (dynamic_scene, atmosphere_controls))
         .run();
 }
 
 fn print_controls() {
-    println!("=== Voxworld Atmosphere Controls ===");
+    println!("=== Voxworld Controls ===");
+    println!("  WASD       - Move");
+    println!("  Space      - Move up");
+    println!("  Shift      - Move down");
+    println!("  Mouse      - Look around");
+    println!("  Esc        - Pause menu");
+    println!("  F3         - Toggle debug overlay");
+    println!();
+    println!("=== Atmosphere Controls ===");
     println!("  1          - Switch to lookup texture rendering method");
     println!("  2          - Switch to raymarched rendering method");
     println!("  P          - Pause/Resume sun motion");

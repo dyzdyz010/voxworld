@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(cargo build:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(cargo clean:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(cargo run:*)"
     ]
   }
 }

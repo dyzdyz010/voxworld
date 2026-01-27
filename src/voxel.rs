@@ -1,20 +1,29 @@
 use bevy::prelude::*;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
+use bevy::tasks::{AsyncComputeTaskPool, Task};
+use futures_lite::future;
 use noise::{NoiseFn, Perlin};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 // ============================================================================
-// Constants
+// 常量定义
 // ============================================================================
 
+/// 区块在X和Z方向上的大小（单位：体素）
 pub const CHUNK_SIZE: i32 = 16;
+/// 区块在Y方向上的高度（单位：体素）
 pub const CHUNK_HEIGHT: i32 = 64;
-pub const RENDER_DISTANCE: i32 = 4; // chunks
+/// 渲染距离（单位：区块数）- 控制玩家周围加载多少区块
+pub const RENDER_DISTANCE: i32 = 16; // chunks
 
 // ============================================================================
-// Block Types
+// 体素（方块）类型
 // ============================================================================
 
+/// 体素种类枚举 - 定义游戏中所有可用的方块类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VoxelKind {
     #[default]
@@ -44,22 +53,32 @@ pub enum VoxelKind {
     DeadBush,
 }
 
+/// 体素的物理属性
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelProperties {
+    /// 温度（摄氏度）
     pub temperature: f32,
+    /// 湿度（0.0-1.0）
     pub humidity: f32,
+    /// 硬度（0.0-1.0，值越大越难破坏）
     pub hardness: f32,
+    /// 延展性（0.0-1.0，值越大越容易变形）
     pub ductility: f32,
 }
 
+/// 体素定义 - 包含体素的所有基础信息
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelDef {
+    /// 方块名称
     pub name: &'static str,
+    /// 方块颜色
     pub color: Color,
+    /// 方块物理属性
     pub props: VoxelProperties,
 }
 
 impl VoxelKind {
+    /// 获取当前体素种类的完整定义信息
     pub fn def(self) -> VoxelDef {
         match self {
             VoxelKind::Air => VoxelDef {
@@ -305,6 +324,7 @@ impl VoxelKind {
         }
     }
 
+    /// 判断体素是否透明（用于渲染优化，透明方块需要渲染相邻面）
     pub fn is_transparent(self) -> bool {
         matches!(
             self,
@@ -320,15 +340,17 @@ impl VoxelKind {
         )
     }
 
+    /// 判断体素是否为固体（用于碰撞检测）
     pub fn is_solid(self) -> bool {
         !matches!(self, VoxelKind::Air | VoxelKind::Flower | VoxelKind::TallGrass | VoxelKind::DeadBush)
     }
 }
 
 // ============================================================================
-// Biomes
+// 生物群系
 // ============================================================================
 
+/// 生物群系类型 - 决定地形的表面方块、植被和环境特征
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Biome {
     Plains,
@@ -342,6 +364,7 @@ pub enum Biome {
 }
 
 impl Biome {
+    /// 获取该生物群系的表面方块类型（地表最顶层的方块）
     pub fn surface_block(self) -> VoxelKind {
         match self {
             Biome::Plains | Biome::Forest | Biome::BirchForest => VoxelKind::Grass,
@@ -353,6 +376,7 @@ impl Biome {
         }
     }
 
+    /// 获取该生物群系的次表层方块类型（表层下方的方块）
     pub fn subsurface_block(self) -> VoxelKind {
         match self {
             Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Taiga => VoxelKind::Dirt,
@@ -364,20 +388,30 @@ impl Biome {
 }
 
 // ============================================================================
-// World Seed & Generation
+// 世界种子与生成
 // ============================================================================
 
+/// 世界种子 - 存储世界生成的随机种子和各种噪声生成器
+/// 使用相同的种子可以生成相同的世界
 #[derive(Resource)]
 pub struct WorldSeed {
+    /// 主种子值
     pub seed: u32,
+    /// 地形高度噪声生成器
     pub terrain_noise: Perlin,
+    /// 生物群系温度噪声生成器
     pub biome_temp_noise: Perlin,
+    /// 生物群系湿度噪声生成器
     pub biome_humid_noise: Perlin,
+    /// 洞穴生成噪声生成器
     pub cave_noise: Perlin,
+    /// 细节噪声生成器（用于矿石、树木等）
     pub detail_noise: Perlin,
 }
 
 impl WorldSeed {
+    /// 从数字种子创建世界种子
+    /// 为不同的噪声生成器分配不同的种子偏移，确保各种噪声独立
     pub fn new(seed: u32) -> Self {
         Self {
             seed,
@@ -389,6 +423,8 @@ impl WorldSeed {
         }
     }
 
+    /// 从字符串创建世界种子
+    /// 通过简单的哈希算法将字符串转换为数字种子
     pub fn from_string(s: &str) -> Self {
         let seed = s
             .bytes()
@@ -404,9 +440,11 @@ impl Default for WorldSeed {
 }
 
 // ============================================================================
-// Chunk System
+// 区块系统
 // ============================================================================
 
+/// 区块坐标 - 用于标识世界中区块的位置
+/// 注意：这是区块坐标，不是体素（方块）坐标
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChunkPos {
     pub x: i32,
@@ -414,10 +452,13 @@ pub struct ChunkPos {
 }
 
 impl ChunkPos {
+    /// 创建新的区块坐标
     pub fn new(x: i32, z: i32) -> Self {
         Self { x, z }
     }
 
+    /// 从世界坐标（体素坐标）转换为区块坐标
+    /// 使用欧几里德除法确保负坐标也能正确转换
     pub fn from_world_pos(world_x: i32, world_z: i32) -> Self {
         Self {
             x: world_x.div_euclid(CHUNK_SIZE),
@@ -425,22 +466,29 @@ impl ChunkPos {
         }
     }
 
+    /// 获取区块在世界坐标系中的起始位置（左下角）
     pub fn world_origin(&self) -> IVec3 {
         IVec3::new(self.x * CHUNK_SIZE, 0, self.z * CHUNK_SIZE)
     }
 }
 
+/// 区块标记组件 - 用于标识游戏实体对应的区块位置
 #[derive(Component)]
 pub struct ChunkMarker {
     pub pos: ChunkPos,
 }
 
+/// 区块数据 - 存储区块内所有体素的类型数据
 pub struct ChunkData {
-    pub voxels: Vec<VoxelKind>, // CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE
+    /// 体素数组，大小为 CHUNK_SIZE × CHUNK_HEIGHT × CHUNK_SIZE
+    /// 使用一维数组存储三维数据，通过 index() 函数计算索引
+    pub voxels: Vec<VoxelKind>,
+    /// 脏标记 - 标识区块是否被修改，需要重新生成网格
     pub is_dirty: bool,
 }
 
 impl ChunkData {
+    /// 创建一个空的区块数据，所有体素初始化为空气
     pub fn new() -> Self {
         Self {
             voxels: vec![VoxelKind::Air; (CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE) as usize],
@@ -448,11 +496,15 @@ impl ChunkData {
         }
     }
 
+    /// 将三维坐标转换为一维数组索引
+    /// 使用Y-Z-X顺序进行线性化，便于按层遍历
     #[inline]
     fn index(x: i32, y: i32, z: i32) -> usize {
         ((y * CHUNK_SIZE * CHUNK_SIZE) + (z * CHUNK_SIZE) + x) as usize
     }
 
+    /// 获取指定位置的体素类型
+    /// 如果坐标超出边界，返回空气
     pub fn get(&self, x: i32, y: i32, z: i32) -> VoxelKind {
         if x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT || z < 0 || z >= CHUNK_SIZE {
             return VoxelKind::Air;
@@ -460,6 +512,9 @@ impl ChunkData {
         self.voxels[Self::index(x, y, z)]
     }
 
+    /// 设置指定位置的体素类型
+    /// 如果坐标超出边界，不执行操作
+    /// 设置后会标记区块为脏，需要重新生成网格
     pub fn set(&mut self, x: i32, y: i32, z: i32, kind: VoxelKind) {
         if x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_HEIGHT || z < 0 || z >= CHUNK_SIZE {
             return;
@@ -469,13 +524,18 @@ impl ChunkData {
     }
 }
 
+/// 体素世界 - 管理整个世界的所有区块
 #[derive(Resource, Default)]
 pub struct VoxelWorld {
+    /// 存储所有已生成的区块数据
     pub chunks: HashMap<ChunkPos, ChunkData>,
+    /// 存储已加载区块对应的实体ID，用于场景管理
     pub loaded_chunks: HashMap<ChunkPos, Entity>,
 }
 
 impl VoxelWorld {
+    /// 获取世界中指定位置的体素类型
+    /// 自动将世界坐标转换为区块坐标和局部坐标
     pub fn get_voxel(&self, world_pos: IVec3) -> VoxelKind {
         let chunk_pos = ChunkPos::from_world_pos(world_pos.x, world_pos.z);
         let local_x = world_pos.x.rem_euclid(CHUNK_SIZE);
@@ -487,6 +547,8 @@ impl VoxelWorld {
             .unwrap_or(VoxelKind::Air)
     }
 
+    /// 设置世界中指定位置的体素类型
+    /// 如果对应的区块不存在，不执行操作
     pub fn set_voxel(&mut self, world_pos: IVec3, kind: VoxelKind) {
         let chunk_pos = ChunkPos::from_world_pos(world_pos.x, world_pos.z);
         let local_x = world_pos.x.rem_euclid(CHUNK_SIZE);
@@ -499,63 +561,88 @@ impl VoxelWorld {
 }
 
 // ============================================================================
-// Terrain Generator
+// 地形生成器
 // ============================================================================
 
+/// 地形生成器 - 使用程序化生成算法创建地形
+/// 基于柏林噪声（Perlin Noise）生成自然的地形特征
 pub struct TerrainGenerator<'a> {
     seed: &'a WorldSeed,
 }
 
 impl<'a> TerrainGenerator<'a> {
+    /// 创建新的地形生成器
     pub fn new(seed: &'a WorldSeed) -> Self {
         Self { seed }
     }
 
+    /// 计算指定位置的地形高度
+    /// 使用多层噪声叠加（分形噪声）生成更自然的地形
+    /// - 第一层：大尺度地形特征（山脉、山谷）
+    /// - 第二层：中等尺度起伏
+    /// - 第三层：小尺度细节
     pub fn get_height(&self, x: i32, z: i32) -> i32 {
         let scale = 0.02;
         let fx = x as f64 * scale;
         let fz = z as f64 * scale;
 
         let mut height = 0.0;
+        // 大尺度地形
         height += self.seed.terrain_noise.get([fx, fz]) * 12.0;
+        // 中等尺度起伏
         height += self.seed.terrain_noise.get([fx * 2.0, fz * 2.0]) * 6.0;
+        // 小尺度细节
         height += self.seed.detail_noise.get([fx * 4.0, fz * 4.0]) * 3.0;
 
         let base_height = 32;
         ((base_height as f64 + height) as i32).clamp(1, CHUNK_HEIGHT - 10)
     }
 
+    /// 根据温度、湿度和高度确定生物群系类型
+    /// 使用噪声函数生成温度和湿度图，模拟真实的气候分布
     pub fn get_biome(&self, x: i32, z: i32) -> Biome {
         let scale = 0.008;
         let fx = x as f64 * scale;
         let fz = z as f64 * scale;
 
+        // 获取温度和湿度值（范围：-1.0 到 1.0）
         let temp = self.seed.biome_temp_noise.get([fx, fz]);
         let humid = self.seed.biome_humid_noise.get([fx, fz]);
         let height = self.get_height(x, z);
 
+        // 低海拔地区为海洋
         if height < 28 {
             return Biome::Ocean;
         }
+        // 海拔稍高的地区为海滩
         if height < 32 {
             return Biome::Beach;
         }
 
+        // 根据温度和湿度确定生物群系
         match (temp, humid) {
+            // 低温地区
             (t, _) if t < -0.3 => {
                 if humid > 0.2 {
-                    Biome::Taiga
+                    Biome::Taiga  // 湿润的寒带 → 针叶林
                 } else {
-                    Biome::Snowy
+                    Biome::Snowy  // 干燥的寒带 → 雪地
                 }
             }
+            // 高温低湿 → 沙漠
             (t, h) if t > 0.3 && h < -0.2 => Biome::Desert,
+            // 高湿度 → 森林
             (_, h) if h > 0.3 => Biome::Forest,
+            // 中等湿度 → 白桦林
             (_, h) if h > 0.0 => Biome::BirchForest,
+            // 默认 → 平原
             _ => Biome::Plains,
         }
     }
 
+    /// 判断指定位置是否应该生成洞穴
+    /// 使用3D噪声生成自然的洞穴系统
+    /// 洞穴只在Y=5到Y=40的范围内生成
     pub fn is_cave(&self, x: i32, y: i32, z: i32) -> bool {
         if y > 40 || y < 5 {
             return false;
@@ -568,6 +655,12 @@ impl<'a> TerrainGenerator<'a> {
         value > 0.55
     }
 
+    /// 根据位置和深度生成矿石
+    /// 越深的地方生成越稀有的矿石
+    /// - 钻石矿：Y < 16，最稀有
+    /// - 金矿：Y < 32，稀有
+    /// - 铁矿：Y < 48，常见
+    /// - 煤矿：Y >= 48，最常见
     pub fn get_ore(&self, x: i32, y: i32, z: i32) -> Option<VoxelKind> {
         let scale = 0.15;
         let noise = self
@@ -590,28 +683,40 @@ impl<'a> TerrainGenerator<'a> {
         }
     }
 
+    /// 判断指定位置是否应该放置树木
+    /// 不同生物群系有不同的树木生成概率
     pub fn should_place_tree(&self, x: i32, z: i32, biome: Biome) -> bool {
+        // 根据生物群系设置树木生成概率
         let tree_chance = match biome {
-            Biome::Forest | Biome::Taiga => 0.06,
-            Biome::BirchForest => 0.04,
-            Biome::Plains => 0.003,
-            _ => 0.0,
+            Biome::Forest | Biome::Taiga => 0.06,  // 森林和针叶林：6%
+            Biome::BirchForest => 0.04,            // 白桦林：4%
+            Biome::Plains => 0.003,                // 平原：0.3%
+            _ => 0.0,                              // 其他生物群系不生成树木
         };
 
         if tree_chance == 0.0 {
             return false;
         }
 
+        // 使用噪声函数随机决定是否生成树木
         let scale = 0.5;
         let noise = self.seed.detail_noise.get([x as f64 * scale, z as f64 * scale]);
         noise > (1.0 - tree_chance * 2.0)
     }
 
+    /// 生成指定区块的完整地形数据
+    /// 生成步骤：
+    /// 1. 生成基础地形（高度、生物群系）
+    /// 2. 填充地下的方块（石头、矿石）
+    /// 3. 生成洞穴系统
+    /// 4. 填充水体
+    /// 5. 生成地表植被（树木）
     pub fn generate_chunk(&self, chunk_pos: ChunkPos) -> ChunkData {
         let mut chunk = ChunkData::new();
         let origin = chunk_pos.world_origin();
         let water_level = 30;
 
+        // 遍历区块中的每一列
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 let wx = origin.x + lx;
@@ -619,24 +724,31 @@ impl<'a> TerrainGenerator<'a> {
                 let height = self.get_height(wx, wz);
                 let biome = self.get_biome(wx, wz);
 
+                // 从下到上填充每一层
                 for y in 0..CHUNK_HEIGHT {
+                    // 如果是洞穴位置，跳过（保持为空气）
                     if self.is_cave(wx, y, wz) && y < height {
                         continue;
                     }
 
                     let kind = if y > height && y <= water_level {
+                        // 地表以上，水位以下 → 水体
                         if biome == Biome::Snowy && y == water_level {
-                            VoxelKind::Ice
+                            VoxelKind::Ice  // 寒冷生物群系的水面结冰
                         } else {
                             VoxelKind::Water
                         }
                     } else if y == height {
+                        // 地表层 → 使用生物群系的表层方块
                         biome.surface_block()
                     } else if y > height - 4 && y < height {
+                        // 次表层（地表下1-3层）→ 使用生物群系的次表层方块
                         biome.subsurface_block()
                     } else if y < height {
+                        // 深层 → 石头或矿石
                         self.get_ore(wx, y, wz).unwrap_or(VoxelKind::Stone)
                     } else {
+                        // 地表以上 → 空气
                         VoxelKind::Air
                     };
 
@@ -645,7 +757,7 @@ impl<'a> TerrainGenerator<'a> {
                     }
                 }
 
-                // Trees
+                // 在水位以上的陆地上生成树木
                 if height > water_level && self.should_place_tree(wx, wz, biome) {
                     self.generate_tree(&mut chunk, lx, height + 1, lz, biome);
                 }
@@ -655,7 +767,10 @@ impl<'a> TerrainGenerator<'a> {
         chunk
     }
 
+    /// 在指定位置生成一棵树
+    /// 根据生物群系类型生成不同的树木（橡树、白桦、云杉）
     fn generate_tree(&self, chunk: &mut ChunkData, x: i32, y: i32, z: i32, biome: Biome) {
+        // 根据生物群系选择树木类型和高度
         let (log, leaves, trunk_h) = match biome {
             Biome::Forest | Biome::Plains => (VoxelKind::OakLog, VoxelKind::OakLeaves, 5),
             Biome::BirchForest => (VoxelKind::BirchLog, VoxelKind::BirchLeaves, 6),
@@ -663,20 +778,23 @@ impl<'a> TerrainGenerator<'a> {
             _ => return,
         };
 
-        // Trunk
+        // 生成树干
         for dy in 0..trunk_h {
             chunk.set(x, y + dy, z, log);
         }
 
-        // Leaves
+        // 生成树叶
         let leaf_start = trunk_h - 2;
         for dy in leaf_start..trunk_h + 2 {
+            // 顶部树叶半径较小，底部树叶半径较大
             let radius: i32 = if dy >= trunk_h { 1 } else { 2 };
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
+                    // 树干位置不放置树叶
                     if dx == 0 && dz == 0 && dy < trunk_h {
                         continue;
                     }
+                    // 使用曼哈顿距离创建菱形树冠
                     if dx.abs() + dz.abs() <= radius + 1 {
                         chunk.set(x + dx, y + dy, z + dz, leaves);
                     }
@@ -687,159 +805,315 @@ impl<'a> TerrainGenerator<'a> {
 }
 
 // ============================================================================
-// Greedy Meshing
+// 顶点去重
 // ============================================================================
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct FaceData {
-    kind: VoxelKind,
-    ao: u8, // ambient occlusion
+/// 顶点唯一标识键 - 用于HashMap去重
+/// 考虑位置、法线和颜色
+#[derive(Clone, Copy)]
+struct VertexKey {
+    /// 位置 - 使用定点数避免浮点精度问题（乘以1000转整数）
+    pos: [i32; 3],
+    /// 法线方向索引 - 6个方向：0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+    normal_index: u8,
+    /// 颜色 - 压缩为32位RGBA
+    color_packed: u32,
 }
 
-struct ChunkMeshBuilder {
+impl VertexKey {
+    /// 从浮点数据创建顶点键
+    fn new(pos: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> Self {
+        // 位置转定点数
+        let pos_fixed = [
+            (pos[0] * 1000.0) as i32,
+            (pos[1] * 1000.0) as i32,
+            (pos[2] * 1000.0) as i32,
+        ];
+
+        // 法线编码为索引
+        let normal_index = match (normal[0] as i32, normal[1] as i32, normal[2] as i32) {
+            (1, 0, 0) => 0,
+            (-1, 0, 0) => 1,
+            (0, 1, 0) => 2,
+            (0, -1, 0) => 3,
+            (0, 0, 1) => 4,
+            (0, 0, -1) => 5,
+            _ => 0,
+        };
+
+        // 颜色压缩为RGBA8888
+        let color_packed = ((color[0] * 255.0) as u32) << 24
+            | ((color[1] * 255.0) as u32) << 16
+            | ((color[2] * 255.0) as u32) << 8
+            | ((color[3] * 255.0) as u32);
+
+        Self {
+            pos: pos_fixed,
+            normal_index,
+            color_packed,
+        }
+    }
+}
+
+impl PartialEq for VertexKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.pos == other.pos
+            && self.normal_index == other.normal_index
+            && self.color_packed == other.color_packed
+    }
+}
+
+impl Eq for VertexKey {}
+
+impl Hash for VertexKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.pos[0].hash(state);
+        self.pos[1].hash(state);
+        self.pos[2].hash(state);
+        self.normal_index.hash(state);
+        self.color_packed.hash(state);
+    }
+}
+
+// ============================================================================
+// 线程本地缓冲区
+// ============================================================================
+
+/// 网格构建缓冲区 - 避免每次分配新Vec
+struct MeshBuffers {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
+    /// 顶点去重HashMap
+    vertex_map: HashMap<VertexKey, u32>,
 }
 
-impl ChunkMeshBuilder {
+impl MeshBuffers {
     fn new() -> Self {
+        // 预分配合理的初始容量
         Self {
-            positions: Vec::new(),
-            normals: Vec::new(),
-            colors: Vec::new(),
-            indices: Vec::new(),
+            positions: Vec::with_capacity(20000),
+            normals: Vec::with_capacity(20000),
+            colors: Vec::with_capacity(20000),
+            indices: Vec::with_capacity(30000),
+            vertex_map: HashMap::with_capacity(20000),
         }
     }
 
-    fn add_face(
+    /// 清空缓冲区但保留容量
+    fn clear(&mut self) {
+        self.positions.clear();
+        self.normals.clear();
+        self.colors.clear();
+        self.indices.clear();
+        self.vertex_map.clear();
+    }
+}
+
+thread_local! {
+    /// 每个线程独立的网格构建缓冲区
+    static MESH_BUFFERS: RefCell<MeshBuffers> = RefCell::new(MeshBuffers::new());
+}
+
+// ============================================================================
+// 贪婪网格化（Greedy Meshing）
+// ============================================================================
+
+/// 面片数据 - 用于网格优化算法
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FaceData {
+    kind: VoxelKind,
+    ao: u8, // 环境光遮蔽（Ambient Occlusion）
+}
+
+/// 优化后的区块网格构建器 - 使用线程本地缓冲区和顶点去重
+struct ChunkMeshBuilder<'a> {
+    buffers: &'a mut MeshBuffers,
+}
+
+impl<'a> ChunkMeshBuilder<'a> {
+    /// 使用线程本地缓冲区创建构建器
+    fn with_buffers(buffers: &'a mut MeshBuffers) -> Self {
+        buffers.clear();
+        Self { buffers }
+    }
+
+    /// 添加面片并进行顶点去重
+    fn add_face_deduplicated(
         &mut self,
         vertices: [[f32; 3]; 4],
         normal: [f32; 3],
         color: [f32; 4],
     ) {
-        let base = self.positions.len() as u32;
+        let mut face_indices = [0u32; 4];
 
-        for v in vertices {
-            self.positions.push(v);
-            self.normals.push(normal);
-            self.colors.push(color);
+        for (i, &pos) in vertices.iter().enumerate() {
+            let key = VertexKey::new(pos, normal, color);
+
+            // 查找或插入顶点
+            let index = match self.buffers.vertex_map.get(&key) {
+                Some(&existing_index) => existing_index,
+                None => {
+                    let new_index = self.buffers.positions.len() as u32;
+                    self.buffers.positions.push(pos);
+                    self.buffers.normals.push(normal);
+                    self.buffers.colors.push(color);
+                    self.buffers.vertex_map.insert(key, new_index);
+                    new_index
+                }
+            };
+
+            face_indices[i] = index;
         }
 
-        // Two triangles per face (counter-clockwise winding)
-        self.indices.extend_from_slice(&[
-            base, base + 2, base + 1,
-            base, base + 3, base + 2,
+        // 添加两个三角形的索引
+        self.buffers.indices.extend_from_slice(&[
+            face_indices[0],
+            face_indices[2],
+            face_indices[1],
+            face_indices[0],
+            face_indices[3],
+            face_indices[2],
         ]);
     }
 
-    fn build(self) -> Mesh {
+    /// 构建最终网格（从缓冲区克隆数据）
+    fn build(&self) -> Mesh {
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, default());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, VertexAttributeValues::Float32x4(self.colors));
-        mesh.insert_indices(Indices::U32(self.indices));
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.buffers.positions.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.buffers.normals.clone());
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_COLOR,
+            VertexAttributeValues::Float32x4(self.buffers.colors.clone()),
+        );
+        mesh.insert_indices(Indices::U32(self.buffers.indices.clone()));
         mesh
     }
 }
 
-pub fn build_chunk_mesh(chunk: &ChunkData, world: &VoxelWorld, chunk_pos: ChunkPos) -> Mesh {
-    let mut builder = ChunkMeshBuilder::new();
-    let origin = chunk_pos.world_origin();
+/// 在工作线程中构建区块网格
+/// 使用线程本地缓冲区和顶点去重优化
+fn build_chunk_mesh_async(input: MeshBuildInput) -> Mesh {
+    MESH_BUFFERS.with(|buffers| {
+        let mut buffers = buffers.borrow_mut();
+        let mut builder = ChunkMeshBuilder::with_buffers(&mut buffers);
 
-    // Face directions: +X, -X, +Y, -Y, +Z, -Z
-    let directions = [
-        (IVec3::X, [1.0, 0.0, 0.0]),
-        (IVec3::NEG_X, [-1.0, 0.0, 0.0]),
-        (IVec3::Y, [0.0, 1.0, 0.0]),
-        (IVec3::NEG_Y, [0.0, -1.0, 0.0]),
-        (IVec3::Z, [0.0, 0.0, 1.0]),
-        (IVec3::NEG_Z, [0.0, 0.0, -1.0]),
-    ];
+        // 6个面的方向和法线
+        let directions: [(IVec3, [f32; 3]); 6] = [
+            (IVec3::X, [1.0, 0.0, 0.0]),
+            (IVec3::NEG_X, [-1.0, 0.0, 0.0]),
+            (IVec3::Y, [0.0, 1.0, 0.0]),
+            (IVec3::NEG_Y, [0.0, -1.0, 0.0]),
+            (IVec3::Z, [0.0, 0.0, 1.0]),
+            (IVec3::NEG_Z, [0.0, 0.0, -1.0]),
+        ];
 
-    for y in 0..CHUNK_HEIGHT {
-        for z in 0..CHUNK_SIZE {
-            for x in 0..CHUNK_SIZE {
-                let kind = chunk.get(x, y, z);
-                if kind == VoxelKind::Air {
-                    continue;
-                }
+        // 遍历区块中的所有体素
+        for y in 0..CHUNK_HEIGHT {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    let index = ((y * CHUNK_SIZE * CHUNK_SIZE) + (z * CHUNK_SIZE) + x) as usize;
+                    let kind = input.voxels[index];
 
-                let def = kind.def();
-                let color = def.color.to_srgba();
-                let base_color = [color.red, color.green, color.blue, color.alpha];
-
-                let world_pos = origin + IVec3::new(x, y, z);
-
-                for (dir, normal) in &directions {
-                    let neighbor_pos = world_pos + *dir;
-                    let neighbor = if neighbor_pos.x >= origin.x
-                        && neighbor_pos.x < origin.x + CHUNK_SIZE
-                        && neighbor_pos.z >= origin.z
-                        && neighbor_pos.z < origin.z + CHUNK_SIZE
-                    {
-                        chunk.get(
-                            neighbor_pos.x - origin.x,
-                            neighbor_pos.y,
-                            neighbor_pos.z - origin.z,
-                        )
-                    } else {
-                        world.get_voxel(neighbor_pos)
-                    };
-
-                    // Only render face if neighbor is transparent (or air)
-                    if !neighbor.is_transparent() {
+                    if kind == VoxelKind::Air {
                         continue;
                     }
 
-                    // Skip water faces between water blocks
-                    if kind == VoxelKind::Water && neighbor == VoxelKind::Water {
-                        continue;
-                    }
+                    let def = kind.def();
+                    let color = def.color.to_srgba();
+                    let base_color = [color.red, color.green, color.blue, color.alpha];
+                    let local_pos = IVec3::new(x, y, z);
 
-                    let vertices = get_face_vertices(x as f32, y as f32, z as f32, *dir);
-                    builder.add_face(vertices, *normal, base_color);
+                    // 检查每个面
+                    for (dir, normal) in &directions {
+                        let neighbor_local = local_pos + *dir;
+
+                        // 判断相邻位置是否在区块内
+                        let neighbor = if neighbor_local.x >= 0
+                            && neighbor_local.x < CHUNK_SIZE
+                            && neighbor_local.y >= 0
+                            && neighbor_local.y < CHUNK_HEIGHT
+                            && neighbor_local.z >= 0
+                            && neighbor_local.z < CHUNK_SIZE
+                        {
+                            // 区块内部查询
+                            let ni = ((neighbor_local.y * CHUNK_SIZE * CHUNK_SIZE)
+                                + (neighbor_local.z * CHUNK_SIZE)
+                                + neighbor_local.x) as usize;
+                            input.voxels[ni]
+                        } else if neighbor_local.y < 0 || neighbor_local.y >= CHUNK_HEIGHT {
+                            // Y方向超出世界边界
+                            VoxelKind::Air
+                        } else {
+                            // 查询相邻区块边界
+                            input
+                                .neighbor_edges
+                                .get_neighbor(local_pos, *dir)
+                                .unwrap_or(VoxelKind::Air)
+                        };
+
+                        // 只渲染暴露的面
+                        if !neighbor.is_transparent() {
+                            continue;
+                        }
+
+                        // 水面之间不渲染
+                        if kind == VoxelKind::Water && neighbor == VoxelKind::Water {
+                            continue;
+                        }
+
+                        let vertices = get_face_vertices(x as f32, y as f32, z as f32, *dir);
+                        builder.add_face_deduplicated(vertices, *normal, base_color);
+                    }
                 }
             }
         }
-    }
 
-    builder.build()
+        builder.build()
+    })
 }
 
+/// 根据方向获取面片的4个顶点坐标
+/// 顶点顺序确保逆时针环绕（用于正确的面剔除）
 fn get_face_vertices(x: f32, y: f32, z: f32, dir: IVec3) -> [[f32; 3]; 4] {
     match (dir.x, dir.y, dir.z) {
+        // 右面 (+X)
         (1, 0, 0) => [
             [x + 1.0, y, z],
             [x + 1.0, y, z + 1.0],
             [x + 1.0, y + 1.0, z + 1.0],
             [x + 1.0, y + 1.0, z],
         ],
+        // 左面 (-X)
         (-1, 0, 0) => [
             [x, y, z + 1.0],
             [x, y, z],
             [x, y + 1.0, z],
             [x, y + 1.0, z + 1.0],
         ],
+        // 上面 (+Y)
         (0, 1, 0) => [
             [x, y + 1.0, z],
             [x + 1.0, y + 1.0, z],
             [x + 1.0, y + 1.0, z + 1.0],
             [x, y + 1.0, z + 1.0],
         ],
+        // 下面 (-Y)
         (0, -1, 0) => [
             [x, y, z + 1.0],
             [x + 1.0, y, z + 1.0],
             [x + 1.0, y, z],
             [x, y, z],
         ],
+        // 前面 (+Z)
         (0, 0, 1) => [
             [x + 1.0, y, z + 1.0],
             [x, y, z + 1.0],
             [x, y + 1.0, z + 1.0],
             [x + 1.0, y + 1.0, z + 1.0],
         ],
+        // 后面 (-Z)
         (0, 0, -1) => [
             [x, y, z],
             [x + 1.0, y, z],
@@ -851,31 +1125,160 @@ fn get_face_vertices(x: f32, y: f32, z: f32, dir: IVec3) -> [[f32; 3]; 4] {
 }
 
 // ============================================================================
-// Components for Raycast
+// 射线检测组件
 // ============================================================================
 
+/// 体素组件 - 用于射线检测和交互
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Voxel {
+    /// 体素类型
     pub kind: VoxelKind,
+    /// 体素的世界坐标
     pub pos: IVec3,
 }
 
 // ============================================================================
-// Plugin & Systems
+// 插件与系统
 // ============================================================================
 
+/// 区块材质资源 - 存储不透明和透明材质的句柄
 #[derive(Resource)]
 pub struct ChunkMaterials {
+    /// 不透明材质（用于大多数方块）
     pub opaque: Handle<StandardMaterial>,
+    /// 透明材质（用于水、冰、树叶等）
     pub transparent: Handle<StandardMaterial>,
 }
 
-#[derive(Resource, Default)]
-pub struct ChunkLoadQueue {
-    pub to_load: Vec<ChunkPos>,
-    pub to_unload: Vec<ChunkPos>,
+// ============================================================================
+// 异步网格生成
+// ============================================================================
+
+/// 相邻区块边界数据 - 用于跨区块面剔除
+#[derive(Clone, Default)]
+pub struct NeighborEdges {
+    /// +X方向相邻区块的X=0面
+    pub pos_x: Option<Vec<VoxelKind>>,
+    /// -X方向相邻区块的X=CHUNK_SIZE-1面
+    pub neg_x: Option<Vec<VoxelKind>>,
+    /// +Z方向相邻区块的Z=0面
+    pub pos_z: Option<Vec<VoxelKind>>,
+    /// -Z方向相邻区块的Z=CHUNK_SIZE-1面
+    pub neg_z: Option<Vec<VoxelKind>>,
 }
 
+impl NeighborEdges {
+    /// 从相邻区块提取边界数据
+    pub fn from_world(world: &VoxelWorld, center: ChunkPos) -> Self {
+        Self {
+            pos_x: world
+                .chunks
+                .get(&ChunkPos::new(center.x + 1, center.z))
+                .map(|c| Self::extract_x_face(c, 0)),
+            neg_x: world
+                .chunks
+                .get(&ChunkPos::new(center.x - 1, center.z))
+                .map(|c| Self::extract_x_face(c, CHUNK_SIZE - 1)),
+            pos_z: world
+                .chunks
+                .get(&ChunkPos::new(center.x, center.z + 1))
+                .map(|c| Self::extract_z_face(c, 0)),
+            neg_z: world
+                .chunks
+                .get(&ChunkPos::new(center.x, center.z - 1))
+                .map(|c| Self::extract_z_face(c, CHUNK_SIZE - 1)),
+        }
+    }
+
+    fn extract_x_face(chunk: &ChunkData, x: i32) -> Vec<VoxelKind> {
+        let mut face = Vec::with_capacity((CHUNK_HEIGHT * CHUNK_SIZE) as usize);
+        for y in 0..CHUNK_HEIGHT {
+            for z in 0..CHUNK_SIZE {
+                face.push(chunk.get(x, y, z));
+            }
+        }
+        face
+    }
+
+    fn extract_z_face(chunk: &ChunkData, z: i32) -> Vec<VoxelKind> {
+        let mut face = Vec::with_capacity((CHUNK_HEIGHT * CHUNK_SIZE) as usize);
+        for y in 0..CHUNK_HEIGHT {
+            for x in 0..CHUNK_SIZE {
+                face.push(chunk.get(x, y, z));
+            }
+        }
+        face
+    }
+
+    /// 获取指定位置的相邻体素
+    pub fn get_neighbor(&self, local_pos: IVec3, dir: IVec3) -> Option<VoxelKind> {
+        match (dir.x, dir.y, dir.z) {
+            (1, 0, 0) if local_pos.x == CHUNK_SIZE - 1 => self
+                .pos_x
+                .as_ref()
+                .map(|f| f[(local_pos.y * CHUNK_SIZE + local_pos.z) as usize]),
+            (-1, 0, 0) if local_pos.x == 0 => self
+                .neg_x
+                .as_ref()
+                .map(|f| f[(local_pos.y * CHUNK_SIZE + local_pos.z) as usize]),
+            (0, 0, 1) if local_pos.z == CHUNK_SIZE - 1 => self
+                .pos_z
+                .as_ref()
+                .map(|f| f[(local_pos.y * CHUNK_SIZE + local_pos.x) as usize]),
+            (0, 0, -1) if local_pos.z == 0 => self
+                .neg_z
+                .as_ref()
+                .map(|f| f[(local_pos.y * CHUNK_SIZE + local_pos.x) as usize]),
+            _ => None,
+        }
+    }
+}
+
+/// 异步网格生成任务输入
+#[derive(Clone)]
+pub struct MeshBuildInput {
+    /// 区块位置
+    pub chunk_pos: ChunkPos,
+    /// 体素数据的副本
+    pub voxels: Arc<Vec<VoxelKind>>,
+    /// 相邻区块的边界体素数据
+    pub neighbor_edges: NeighborEdges,
+}
+
+/// 正在进行的网格生成任务
+#[derive(Component)]
+pub struct ComputeMeshTask {
+    /// 异步任务句柄
+    pub task: Task<Mesh>,
+    /// 区块位置
+    pub chunk_pos: ChunkPos,
+}
+
+/// 区块加载队列 - 管理需要加载和卸载的区块
+#[derive(Resource)]
+pub struct ChunkLoadQueue {
+    /// 待加载的区块列表
+    pub to_load: Vec<ChunkPos>,
+    /// 待卸载的区块列表
+    pub to_unload: Vec<ChunkPos>,
+    /// 当前活跃的异步任务数量
+    pub active_tasks: usize,
+    /// 最大并发任务数
+    pub max_concurrent_tasks: usize,
+}
+
+impl Default for ChunkLoadQueue {
+    fn default() -> Self {
+        Self {
+            to_load: Vec::new(),
+            to_unload: Vec::new(),
+            active_tasks: 0,
+            max_concurrent_tasks: 4,
+        }
+    }
+}
+
+/// 体素系统插件 - 负责注册体素相关的资源和系统
 pub struct VoxelPlugin;
 
 impl Plugin for VoxelPlugin {
@@ -884,17 +1287,30 @@ impl Plugin for VoxelPlugin {
             .init_resource::<WorldSeed>()
             .init_resource::<ChunkLoadQueue>()
             .add_systems(Startup, setup_materials)
-            .add_systems(Update, (update_chunk_loading, process_chunk_queue).chain());
+            .add_systems(
+                Update,
+                (
+                    update_chunk_loading,
+                    spawn_mesh_tasks,
+                    handle_completed_mesh_tasks,
+                    process_chunk_unload,
+                )
+                    .chain(),
+            );
     }
 }
 
+/// 初始化材质系统
+/// 创建不透明和透明两种材质
 fn setup_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+    // 不透明材质：高粗糙度，适合大多数方块
     let opaque = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.9,
         ..default()
     });
 
+    // 透明材质：低粗糙度，支持透明混合
     let transparent = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.3,
@@ -905,10 +1321,14 @@ fn setup_materials(mut commands: Commands, mut materials: ResMut<Assets<Standard
     commands.insert_resource(ChunkMaterials { opaque, transparent });
 }
 
+/// 更新区块加载系统
+/// 根据摄像机位置决定哪些区块需要加载或卸载
+/// 按距离排序：距离近的优先加载
 fn update_chunk_loading(
     camera_query: Query<&Transform, With<Camera3d>>,
     world: Res<VoxelWorld>,
     mut queue: ResMut<ChunkLoadQueue>,
+    pending_query: Query<&ComputeMeshTask>,
 ) {
     let Ok(camera_transform) = camera_query.single() else {
         return;
@@ -917,17 +1337,41 @@ fn update_chunk_loading(
     let camera_pos = camera_transform.translation;
     let center_chunk = ChunkPos::from_world_pos(camera_pos.x as i32, camera_pos.z as i32);
 
-    // Find chunks to load
+    // 收集正在处理中的区块
+    let pending_chunks: Vec<ChunkPos> = pending_query.iter().map(|t| t.chunk_pos).collect();
+
+    // 收集需要加载的区块
+    let mut chunks_to_add = Vec::new();
     for dx in -RENDER_DISTANCE..=RENDER_DISTANCE {
         for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
             let chunk_pos = ChunkPos::new(center_chunk.x + dx, center_chunk.z + dz);
-            if !world.loaded_chunks.contains_key(&chunk_pos) && !queue.to_load.contains(&chunk_pos) {
-                queue.to_load.push(chunk_pos);
+            if !world.loaded_chunks.contains_key(&chunk_pos)
+                && !world.chunks.contains_key(&chunk_pos)
+                && !queue.to_load.contains(&chunk_pos)
+                && !pending_chunks.contains(&chunk_pos)
+            {
+                chunks_to_add.push(chunk_pos);
             }
         }
     }
 
-    // Find chunks to unload
+    // 按距离排序（距离近的优先）
+    chunks_to_add.sort_by(|a, b| {
+        let dist_a = (a.x - center_chunk.x).pow(2) + (a.z - center_chunk.z).pow(2);
+        let dist_b = (b.x - center_chunk.x).pow(2) + (b.z - center_chunk.z).pow(2);
+        dist_a.cmp(&dist_b)
+    });
+
+    queue.to_load.extend(chunks_to_add);
+
+    // 重新排序整个队列（玩家移动后需要重新排序）
+    queue.to_load.sort_by(|a, b| {
+        let dist_a = (a.x - center_chunk.x).pow(2) + (a.z - center_chunk.z).pow(2);
+        let dist_b = (b.x - center_chunk.x).pow(2) + (b.z - center_chunk.z).pow(2);
+        dist_a.cmp(&dist_b)
+    });
+
+    // 查找需要卸载的区块（超出渲染距离+1）
     for &chunk_pos in world.loaded_chunks.keys() {
         let dx = (chunk_pos.x - center_chunk.x).abs();
         let dz = (chunk_pos.z - center_chunk.z).abs();
@@ -939,49 +1383,123 @@ fn update_chunk_loading(
     }
 }
 
-fn process_chunk_queue(
+/// 派发异步网格生成任务
+fn spawn_mesh_tasks(
+    mut commands: Commands,
+    mut world: ResMut<VoxelWorld>,
+    mut queue: ResMut<ChunkLoadQueue>,
+    seed: Res<WorldSeed>,
+) {
+    // 限制并发任务数
+    let available_slots = queue.max_concurrent_tasks.saturating_sub(queue.active_tasks);
+    if available_slots == 0 {
+        return;
+    }
+
+    let count = queue.to_load.len().min(available_slots);
+    let chunks_to_process: Vec<_> = queue.to_load.drain(..count).collect();
+
+    let task_pool = AsyncComputeTaskPool::get();
+
+    for chunk_pos in chunks_to_process {
+        // 同步生成区块数据（快速操作）
+        let generator = TerrainGenerator::new(&seed);
+        let chunk_data = generator.generate_chunk(chunk_pos);
+
+        // 准备异步任务输入
+        let input = MeshBuildInput {
+            chunk_pos,
+            voxels: Arc::new(chunk_data.voxels.clone()),
+            neighbor_edges: NeighborEdges::from_world(&world, chunk_pos),
+        };
+
+        // 存储区块数据
+        world.chunks.insert(chunk_pos, chunk_data);
+
+        // 派发异步任务
+        let task = task_pool.spawn(async move { build_chunk_mesh_async(input) });
+
+        // 创建等待实体
+        commands.spawn(ComputeMeshTask { task, chunk_pos });
+
+        queue.active_tasks += 1;
+    }
+}
+
+/// 处理完成的网格生成任务
+fn handle_completed_mesh_tasks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<ChunkMaterials>,
     mut world: ResMut<VoxelWorld>,
     mut queue: ResMut<ChunkLoadQueue>,
-    seed: Res<WorldSeed>,
+    mut pending_query: Query<(Entity, &mut ComputeMeshTask)>,
 ) {
-    // Unload chunks
-    for chunk_pos in queue.to_unload.drain(..) {
-        if let Some(entity) = world.loaded_chunks.remove(&chunk_pos) {
+    for (entity, mut task) in pending_query.iter_mut() {
+        // 非阻塞地检查任务是否完成
+        if let Some(mesh) = future::block_on(future::poll_once(&mut task.task)) {
+            let chunk_pos = task.chunk_pos;
+
+            // 移除等待实体
             commands.entity(entity).despawn();
+            queue.active_tasks = queue.active_tasks.saturating_sub(1);
+
+            // 检查区块是否仍然需要（可能已被卸载）
+            if !world.chunks.contains_key(&chunk_pos) {
+                continue;
+            }
+
+            // 创建区块渲染实体
+            let mesh_handle = meshes.add(mesh);
+            let origin = chunk_pos.world_origin();
+
+            let chunk_entity = commands
+                .spawn((
+                    Mesh3d(mesh_handle),
+                    MeshMaterial3d(materials.opaque.clone()),
+                    Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
+                    ChunkMarker { pos: chunk_pos },
+                ))
+                .id();
+
+            world.loaded_chunks.insert(chunk_pos, chunk_entity);
         }
-        world.chunks.remove(&chunk_pos);
-    }
-
-    // Load up to 2 chunks per frame
-    let count = queue.to_load.len().min(2);
-    let chunks_to_load: Vec<_> = queue.to_load.drain(..count).collect();
-
-    for chunk_pos in chunks_to_load {
-        let generator = TerrainGenerator::new(&seed);
-        let chunk_data = generator.generate_chunk(chunk_pos);
-
-        // Build mesh
-        let mesh = build_chunk_mesh(&chunk_data, &world, chunk_pos);
-        let mesh_handle = meshes.add(mesh);
-
-        let origin = chunk_pos.world_origin();
-        let entity = commands
-            .spawn((
-                Mesh3d(mesh_handle),
-                MeshMaterial3d(materials.opaque.clone()),
-                Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
-                ChunkMarker { pos: chunk_pos },
-            ))
-            .id();
-
-        world.chunks.insert(chunk_pos, chunk_data);
-        world.loaded_chunks.insert(chunk_pos, entity);
     }
 }
 
+/// 处理区块卸载
+fn process_chunk_unload(
+    mut commands: Commands,
+    mut world: ResMut<VoxelWorld>,
+    mut queue: ResMut<ChunkLoadQueue>,
+    pending_query: Query<(Entity, &ComputeMeshTask)>,
+) {
+    // 先收集要卸载的区块和要取消的任务数
+    let chunks_to_unload: Vec<_> = queue.to_unload.drain(..).collect();
+    let mut tasks_to_cancel = 0;
+
+    for chunk_pos in chunks_to_unload {
+        // 卸载已渲染的区块
+        if let Some(entity) = world.loaded_chunks.remove(&chunk_pos) {
+            commands.entity(entity).despawn();
+        }
+
+        // 取消该区块的待处理任务
+        for (entity, task) in pending_query.iter() {
+            if task.chunk_pos == chunk_pos {
+                commands.entity(entity).despawn();
+                tasks_to_cancel += 1;
+            }
+        }
+
+        world.chunks.remove(&chunk_pos);
+    }
+
+    // 更新活跃任务计数
+    queue.active_tasks = queue.active_tasks.saturating_sub(tasks_to_cancel);
+}
+
+/// 将整数向量转换为浮点向量（辅助函数）
 pub fn ivec3_to_vec3(pos: IVec3) -> Vec3 {
     Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32)
 }

@@ -6,7 +6,8 @@
       "Bash(cargo clean:*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:docs.rs)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo fix:*)"
     ]
   }
 }

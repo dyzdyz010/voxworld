@@ -992,6 +992,84 @@ impl<'a> ChunkMeshBuilder<'a> {
     }
 }
 
+/// 创建蓝色线框占位符网格
+/// 只绘制区块的立方体边框（12条边）
+fn create_placeholder_mesh() -> Mesh {
+    let size = CHUNK_SIZE as f32;
+    let height = CHUNK_HEIGHT as f32;
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut colors = Vec::new();
+    let mut indices = Vec::new();
+
+    // 半透明蓝色
+    let blue = [0.3, 0.6, 1.0, 0.3];
+    let normal = [0.0, 1.0, 0.0]; // 线框法线随意
+
+    // 8个角的顶点
+    let corners = [
+        [0.0, 0.0, 0.0],       // 0: 左下前
+        [size, 0.0, 0.0],      // 1: 右下前
+        [size, 0.0, size],     // 2: 右下后
+        [0.0, 0.0, size],      // 3: 左下后
+        [0.0, height, 0.0],    // 4: 左上前
+        [size, height, 0.0],   // 5: 右上前
+        [size, height, size],  // 6: 右上后
+        [0.0, height, size],   // 7: 左上后
+    ];
+
+    // 12条边（每条边连接两个顶点）
+    let edges = [
+        // 底部4条边
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        // 顶部4条边
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        // 垂直4条边
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ];
+
+    // 为每条边添加两个顶点
+    for (start, end) in edges {
+        let idx = positions.len() as u32;
+        positions.push(corners[start]);
+        positions.push(corners[end]);
+        normals.push(normal);
+        normals.push(normal);
+        colors.push(blue);
+        colors.push(blue);
+        indices.extend_from_slice(&[idx, idx + 1]);
+    }
+
+    let mut mesh = Mesh::new(PrimitiveTopology::LineList, default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+/// 在工作线程中生成区块数据并构建网格
+/// 包含地形生成和网格构建两个阶段
+fn generate_chunk_and_mesh_async(chunk_pos: ChunkPos, seed: u32) -> (Vec<VoxelKind>, Mesh) {
+    // 阶段1：生成区块地形数据
+    let world_seed = WorldSeed::new(seed);
+    let generator = TerrainGenerator::new(&world_seed);
+    let chunk_data = generator.generate_chunk(chunk_pos);
+    let voxels = chunk_data.voxels.clone();
+
+    // 阶段2：构建网格（需要相邻区块数据，但首次生成时使用空边界）
+    let input = MeshBuildInput {
+        chunk_pos,
+        voxels: Arc::new(voxels.clone()),
+        neighbor_edges: NeighborEdges::default(),
+    };
+
+    let mesh = build_chunk_mesh_async(input);
+
+    (voxels, mesh)
+}
+
 /// 在工作线程中构建区块网格
 /// 使用线程本地缓冲区和顶点去重优化
 fn build_chunk_mesh_async(input: MeshBuildInput) -> Mesh {
@@ -1248,10 +1326,12 @@ pub struct MeshBuildInput {
 /// 正在进行的网格生成任务
 #[derive(Component)]
 pub struct ComputeMeshTask {
-    /// 异步任务句柄
-    pub task: Task<Mesh>,
+    /// 异步任务句柄（包含区块生成和网格构建）
+    pub task: Task<(Vec<VoxelKind>, Mesh)>,
     /// 区块位置
     pub chunk_pos: ChunkPos,
+    /// 占位符实体ID（生成完成后需要替换）
+    pub placeholder_entity: Entity,
 }
 
 /// 区块加载队列 - 管理需要加载和卸载的区块
@@ -1265,6 +1345,46 @@ pub struct ChunkLoadQueue {
     pub active_tasks: usize,
     /// 最大并发任务数
     pub max_concurrent_tasks: usize,
+    /// 待批量创建占位符的区块（新加入队列的区块）
+    pub pending_placeholders: Vec<ChunkPos>,
+}
+
+/// 占位符实体映射 - 保存每个区块位置对应的占位符实体
+#[derive(Resource, Default)]
+pub struct PlaceholderEntities {
+    pub map: HashMap<ChunkPos, Entity>,
+}
+
+/// 完成的区块数据（等待批量替换）
+pub struct CompletedChunk {
+    pub chunk_pos: ChunkPos,
+    pub voxels: Vec<VoxelKind>,
+    pub mesh: Mesh,
+    pub placeholder_entity: Entity,
+}
+
+/// 批量替换缓冲区 - 收集完成的区块，批量替换占位符
+#[derive(Resource)]
+pub struct ChunkReplacementBuffer {
+    /// 完成的区块数据
+    pub completed: Vec<CompletedChunk>,
+    /// 批量替换定时器（秒）
+    pub timer: f32,
+    /// 批量替换间隔（秒）
+    pub interval: f32,
+    /// 最小批量大小
+    pub min_batch_size: usize,
+}
+
+impl Default for ChunkReplacementBuffer {
+    fn default() -> Self {
+        Self {
+            completed: Vec::new(),
+            timer: 0.0,
+            interval: 0.3, // 每0.3秒批量替换一次
+            min_batch_size: 3, // 至少3个区块一起替换
+        }
+    }
 }
 
 impl Default for ChunkLoadQueue {
@@ -1273,7 +1393,8 @@ impl Default for ChunkLoadQueue {
             to_load: Vec::new(),
             to_unload: Vec::new(),
             active_tasks: 0,
-            max_concurrent_tasks: 4,
+            max_concurrent_tasks: 64,
+            pending_placeholders: Vec::new(),
         }
     }
 }
@@ -1286,13 +1407,17 @@ impl Plugin for VoxelPlugin {
         app.init_resource::<VoxelWorld>()
             .init_resource::<WorldSeed>()
             .init_resource::<ChunkLoadQueue>()
+            .init_resource::<ChunkReplacementBuffer>()
+            .init_resource::<PlaceholderEntities>()
             .add_systems(Startup, setup_materials)
             .add_systems(
                 Update,
                 (
                     update_chunk_loading,
+                    spawn_batch_placeholders,
                     spawn_mesh_tasks,
                     handle_completed_mesh_tasks,
+                    apply_chunk_replacements,
                     process_chunk_unload,
                 )
                     .chain(),
@@ -1362,6 +1487,11 @@ fn update_chunk_loading(
         dist_a.cmp(&dist_b)
     });
 
+    // 如果有新区块加入，将它们添加到待批量创建占位符列表
+    if !chunks_to_add.is_empty() {
+        queue.pending_placeholders.extend(chunks_to_add.iter().copied());
+    }
+
     queue.to_load.extend(chunks_to_add);
 
     // 重新排序整个队列（玩家移动后需要重新排序）
@@ -1383,11 +1513,47 @@ fn update_chunk_loading(
     }
 }
 
-/// 派发异步网格生成任务
+/// 批量创建占位符实体（一次性显示整个加载范围的蓝色网格线）
+fn spawn_batch_placeholders(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<ChunkMaterials>,
+    mut queue: ResMut<ChunkLoadQueue>,
+    mut placeholders: ResMut<PlaceholderEntities>,
+) {
+    if queue.pending_placeholders.is_empty() {
+        return;
+    }
+
+    // 批量创建所有待创建的占位符
+    let chunks_to_create: Vec<_> = queue.pending_placeholders.drain(..).collect();
+
+    // 创建共享的占位符网格（所有区块使用同一个网格）
+    let placeholder_mesh = create_placeholder_mesh();
+    let placeholder_handle = meshes.add(placeholder_mesh);
+
+    for chunk_pos in chunks_to_create {
+        let origin = chunk_pos.world_origin();
+
+        let placeholder_entity = commands
+            .spawn((
+                Mesh3d(placeholder_handle.clone()),
+                MeshMaterial3d(materials.transparent.clone()),
+                Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
+                ChunkMarker { pos: chunk_pos },
+            ))
+            .id();
+
+        // 保存占位符实体，供后续任务使用
+        placeholders.map.insert(chunk_pos, placeholder_entity);
+    }
+}
+
+/// 派发异步网格生成任务（使用已创建的占位符）
 fn spawn_mesh_tasks(
     mut commands: Commands,
-    mut world: ResMut<VoxelWorld>,
     mut queue: ResMut<ChunkLoadQueue>,
+    placeholders: ResMut<PlaceholderEntities>,
     seed: Res<WorldSeed>,
 ) {
     // 限制并发任务数
@@ -1400,78 +1566,127 @@ fn spawn_mesh_tasks(
     let chunks_to_process: Vec<_> = queue.to_load.drain(..count).collect();
 
     let task_pool = AsyncComputeTaskPool::get();
+    let seed_value = seed.seed;
 
     for chunk_pos in chunks_to_process {
-        // 同步生成区块数据（快速操作）
-        let generator = TerrainGenerator::new(&seed);
-        let chunk_data = generator.generate_chunk(chunk_pos);
-
-        // 准备异步任务输入
-        let input = MeshBuildInput {
-            chunk_pos,
-            voxels: Arc::new(chunk_data.voxels.clone()),
-            neighbor_edges: NeighborEdges::from_world(&world, chunk_pos),
+        // 从占位符映射中获取已创建的占位符实体
+        let placeholder_entity = match placeholders.map.get(&chunk_pos) {
+            Some(&entity) => entity,
+            None => {
+                // 如果没有占位符（不应该发生），跳过这个区块
+                continue;
+            }
         };
 
-        // 存储区块数据
-        world.chunks.insert(chunk_pos, chunk_data);
+        // 派发异步任务（包含区块生成和网格构建）
+        let task = task_pool.spawn(async move {
+            generate_chunk_and_mesh_async(chunk_pos, seed_value)
+        });
 
-        // 派发异步任务
-        let task = task_pool.spawn(async move { build_chunk_mesh_async(input) });
-
-        // 创建等待实体
-        commands.spawn(ComputeMeshTask { task, chunk_pos });
+        // 创建任务跟踪实体
+        commands.spawn(ComputeMeshTask {
+            task,
+            chunk_pos,
+            placeholder_entity,
+        });
 
         queue.active_tasks += 1;
     }
 }
 
-/// 处理完成的网格生成任务
+/// 处理完成的网格生成任务（收集到缓冲区，等待批量替换）
 fn handle_completed_mesh_tasks(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    materials: Res<ChunkMaterials>,
-    mut world: ResMut<VoxelWorld>,
     mut queue: ResMut<ChunkLoadQueue>,
+    mut buffer: ResMut<ChunkReplacementBuffer>,
     mut pending_query: Query<(Entity, &mut ComputeMeshTask)>,
 ) {
     for (entity, mut task) in pending_query.iter_mut() {
         // 非阻塞地检查任务是否完成
-        if let Some(mesh) = future::block_on(future::poll_once(&mut task.task)) {
+        if let Some((voxels, mesh)) = future::block_on(future::poll_once(&mut task.task)) {
             let chunk_pos = task.chunk_pos;
+            let placeholder_entity = task.placeholder_entity;
 
-            // 移除等待实体
+            // 移除任务跟踪实体
             commands.entity(entity).despawn();
             queue.active_tasks = queue.active_tasks.saturating_sub(1);
 
-            // 检查区块是否仍然需要（可能已被卸载）
-            if !world.chunks.contains_key(&chunk_pos) {
-                continue;
-            }
-
-            // 创建区块渲染实体
-            let mesh_handle = meshes.add(mesh);
-            let origin = chunk_pos.world_origin();
-
-            let chunk_entity = commands
-                .spawn((
-                    Mesh3d(mesh_handle),
-                    MeshMaterial3d(materials.opaque.clone()),
-                    Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
-                    ChunkMarker { pos: chunk_pos },
-                ))
-                .id();
-
-            world.loaded_chunks.insert(chunk_pos, chunk_entity);
+            // 收集到缓冲区，等待批量替换
+            buffer.completed.push(CompletedChunk {
+                chunk_pos,
+                voxels,
+                mesh,
+                placeholder_entity,
+            });
         }
     }
 }
 
-/// 处理区块卸载
+/// 批量替换占位符为真实区块
+/// 按时间间隔或达到批量大小时触发，减少闪烁
+fn apply_chunk_replacements(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<ChunkMaterials>,
+    mut world: ResMut<VoxelWorld>,
+    mut buffer: ResMut<ChunkReplacementBuffer>,
+    mut placeholders: ResMut<PlaceholderEntities>,
+) {
+    if buffer.completed.is_empty() {
+        return;
+    }
+
+    // 更新定时器
+    buffer.timer += time.delta_secs();
+
+    // 检查是否应该批量替换
+    let should_replace = buffer.completed.len() >= buffer.min_batch_size
+        || buffer.timer >= buffer.interval;
+
+    if !should_replace {
+        return;
+    }
+
+    // 重置定时器
+    buffer.timer = 0.0;
+
+    // 批量替换所有完成的区块
+    for completed in buffer.completed.drain(..) {
+        // 存储区块数据
+        world.chunks.insert(completed.chunk_pos, ChunkData {
+            voxels: completed.voxels,
+            is_dirty: false,
+        });
+
+        // 移除蓝色占位符实体
+        commands.entity(completed.placeholder_entity).despawn();
+        placeholders.map.remove(&completed.chunk_pos);
+
+        // 创建真实区块渲染实体（替换占位符）
+        let mesh_handle = meshes.add(completed.mesh);
+        let origin = completed.chunk_pos.world_origin();
+
+        let chunk_entity = commands
+            .spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(materials.opaque.clone()),
+                Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
+                ChunkMarker { pos: completed.chunk_pos },
+            ))
+            .id();
+
+        world.loaded_chunks.insert(completed.chunk_pos, chunk_entity);
+    }
+}
+
+/// 处理区块卸载（包括占位符和任务取消）
 fn process_chunk_unload(
     mut commands: Commands,
     mut world: ResMut<VoxelWorld>,
     mut queue: ResMut<ChunkLoadQueue>,
+    mut buffer: ResMut<ChunkReplacementBuffer>,
+    mut placeholders: ResMut<PlaceholderEntities>,
     pending_query: Query<(Entity, &ComputeMeshTask)>,
 ) {
     // 先收集要卸载的区块和要取消的任务数
@@ -1484,13 +1699,27 @@ fn process_chunk_unload(
             commands.entity(entity).despawn();
         }
 
-        // 取消该区块的待处理任务
+        // 取消该区块的待处理任务并删除占位符
         for (entity, task) in pending_query.iter() {
             if task.chunk_pos == chunk_pos {
+                // 删除任务跟踪实体
                 commands.entity(entity).despawn();
+                // 删除蓝色占位符实体
+                commands.entity(task.placeholder_entity).despawn();
                 tasks_to_cancel += 1;
             }
         }
+
+        // 删除独立的占位符（如果存在）
+        if let Some(entity) = placeholders.map.remove(&chunk_pos) {
+            commands.entity(entity).despawn();
+        }
+
+        // 从替换缓冲区中移除该区块（如果存在）
+        buffer.completed.retain(|c| c.chunk_pos != chunk_pos);
+
+        // 从待创建占位符列表中移除（如果存在）
+        queue.pending_placeholders.retain(|&pos| pos != chunk_pos);
 
         world.chunks.remove(&chunk_pos);
     }

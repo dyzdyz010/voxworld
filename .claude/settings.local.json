@@ -10,7 +10,8 @@
       "Bash(cargo fix:*)",
       "Bash(for file in *.rs)",
       "Bash(done)",
-      "Bash(sort:*)"
+      "Bash(sort:*)",
+      "Bash(wc:*)"
     ]
   }
 }

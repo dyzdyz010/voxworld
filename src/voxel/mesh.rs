@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::voxel::constants::{CHUNK_HEIGHT, CHUNK_SIZE};
+use crate::voxel::constants::CHUNK_SIZE;
 
 // ============================================================================
 // 顶点去重
@@ -187,6 +187,19 @@ impl<'a> ChunkMeshBuilder<'a> {
         mesh.insert_indices(Indices::U32(self.buffers.indices.clone()));
         mesh
     }
+
+    /// 构建空网格（用于空气区块优化）
+    pub fn build_empty_mesh() -> Mesh {
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_COLOR,
+            VertexAttributeValues::Float32x4(Vec::new()),
+        );
+        mesh.insert_indices(Indices::U32(Vec::new()));
+        mesh
+    }
 }
 
 // ============================================================================
@@ -197,7 +210,6 @@ impl<'a> ChunkMeshBuilder<'a> {
 /// 只绘制区块的立方体边框（12条边）
 pub fn create_placeholder_mesh() -> Mesh {
     let size = CHUNK_SIZE as f32;
-    let height = CHUNK_HEIGHT as f32;
 
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -210,14 +222,14 @@ pub fn create_placeholder_mesh() -> Mesh {
 
     // 8个角的顶点
     let corners = [
-        [0.0, 0.0, 0.0],      // 0: 左下前
-        [size, 0.0, 0.0],     // 1: 右下前
-        [size, 0.0, size],    // 2: 右下后
-        [0.0, 0.0, size],     // 3: 左下后
-        [0.0, height, 0.0],   // 4: 左上前
-        [size, height, 0.0],  // 5: 右上前
-        [size, height, size], // 6: 右上后
-        [0.0, height, size],  // 7: 左上后
+        [0.0, 0.0, 0.0],    // 0: 左下前
+        [size, 0.0, 0.0],   // 1: 右下前
+        [size, 0.0, size],  // 2: 右下后
+        [0.0, 0.0, size],   // 3: 左下后
+        [0.0, size, 0.0],   // 4: 左上前
+        [size, size, 0.0],  // 5: 右上前
+        [size, size, size], // 6: 右上后
+        [0.0, size, size],  // 7: 左上后
     ];
 
     // 12条边（每条边连接两个顶点）

@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use std::sync::Arc;
 
 use crate::voxel::chunk::{ChunkData, ChunkPos};
-use crate::voxel::constants::{CHUNK_HEIGHT, CHUNK_SIZE};
+use crate::voxel::constants::CHUNK_SIZE;
 use crate::voxel::loading::{MeshBuildInput, NeighborEdges};
 use crate::voxel::mesh::{get_face_vertices, ChunkMeshBuilder, MESH_BUFFERS};
 use crate::voxel::seed::WorldSeed;
@@ -35,6 +35,19 @@ pub fn generate_chunk_and_mesh_async(chunk_pos: ChunkPos, seed: u32) -> (Vec<Vox
 /// 在工作线程中构建区块网格
 /// 使用线程本地缓冲区和顶点去重优化
 pub fn build_chunk_mesh_async(input: MeshBuildInput) -> Mesh {
+    // 优化1: 检查是否为空气chunk，如果是则返回空网格
+    let is_empty = input.voxels.iter().all(|&kind| kind == VoxelKind::Air);
+    if is_empty {
+        return ChunkMeshBuilder::build_empty_mesh();
+    }
+
+    // 优化2: 检查是否完全被包围且不透明
+    // 如果chunk完全不透明且所有相邻面都是不透明的，表面不可见
+    let is_fully_opaque = input.voxels.iter().all(|&kind| !kind.is_transparent());
+    if is_fully_opaque && input.is_fully_enclosed() {
+        return ChunkMeshBuilder::build_empty_mesh();
+    }
+
     MESH_BUFFERS.with(|buffers| {
         let mut buffers = buffers.borrow_mut();
         let mut builder = ChunkMeshBuilder::with_buffers(&mut buffers);
@@ -50,7 +63,7 @@ pub fn build_chunk_mesh_async(input: MeshBuildInput) -> Mesh {
         ];
 
         // 遍历区块中的所有体素
-        for y in 0..CHUNK_HEIGHT {
+        for y in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
                     let index = ChunkData::index(x, y, z);
@@ -73,7 +86,7 @@ pub fn build_chunk_mesh_async(input: MeshBuildInput) -> Mesh {
                         let neighbor = if neighbor_local.x >= 0
                             && neighbor_local.x < CHUNK_SIZE
                             && neighbor_local.y >= 0
-                            && neighbor_local.y < CHUNK_HEIGHT
+                            && neighbor_local.y < CHUNK_SIZE
                             && neighbor_local.z >= 0
                             && neighbor_local.z < CHUNK_SIZE
                         {
@@ -84,9 +97,6 @@ pub fn build_chunk_mesh_async(input: MeshBuildInput) -> Mesh {
                                 neighbor_local.z,
                             );
                             input.voxels[ni]
-                        } else if neighbor_local.y < 0 || neighbor_local.y >= CHUNK_HEIGHT {
-                            // Y方向超出世界边界
-                            VoxelKind::Air
                         } else {
                             // 查询相邻区块边界
                             input

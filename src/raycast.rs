@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::player::PlayerCamera;
-use crate::voxel::{ivec3_to_vec3, VoxelKind, VoxelWorld, CHUNK_HEIGHT};
+use crate::voxel::{ivec3_to_vec3, VoxelKind, VoxelWorld};
 
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelHit {
@@ -88,19 +88,14 @@ fn dda_raycast(world: &VoxelWorld, origin: Vec3, dir: Vec3, max_dist: f32) -> Op
     let mut distance = 0.0;
 
     while distance < max_dist {
-        // Check bounds
-        if pos.y < 0 || pos.y >= CHUNK_HEIGHT {
-            // Step to next voxel anyway
-        } else {
-            // Check current voxel
-            let kind = world.get_voxel(pos);
-            if kind != VoxelKind::Air && kind.is_solid() {
-                return Some(VoxelHit {
-                    pos,
-                    kind,
-                    distance,
-                });
-            }
+        // Check current voxel
+        let kind = world.get_voxel(pos);
+        if kind != VoxelKind::Air && kind.is_solid() {
+            return Some(VoxelHit {
+                pos,
+                kind,
+                distance,
+            });
         }
 
         // Move to next voxel (step along the axis with smallest t_max)

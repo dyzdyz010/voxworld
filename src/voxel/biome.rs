@@ -13,6 +13,7 @@ pub enum Biome {
     Taiga,
     Ocean,
     Beach,
+    FloatingIslands, // 浮空岛生物群系
 }
 
 impl Biome {
@@ -25,6 +26,7 @@ impl Biome {
             Biome::Taiga => VoxelKind::Grass,
             Biome::Ocean => VoxelKind::Gravel,
             Biome::Beach => VoxelKind::Sand,
+            Biome::FloatingIslands => VoxelKind::Grass, // 浮空岛顶部是草地
         }
     }
 
@@ -35,6 +37,7 @@ impl Biome {
             Biome::Desert | Biome::Beach => VoxelKind::Sand,
             Biome::Snowy => VoxelKind::Dirt,
             Biome::Ocean => VoxelKind::Clay,
+            Biome::FloatingIslands => VoxelKind::Dirt, // 浮空岛次表层是泥土
         }
     }
 }

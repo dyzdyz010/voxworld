@@ -5,7 +5,7 @@ use bevy::tasks::AsyncComputeTaskPool;
 use futures_lite::future;
 
 use crate::voxel::chunk::{ChunkData, ChunkMarker, ChunkPos, VoxelWorld};
-use crate::voxel::constants::{CHUNK_HEIGHT, CHUNK_SIZE, RENDER_DISTANCE};
+use crate::voxel::constants::{CHUNK_SIZE, RENDER_DISTANCE, VERTICAL_RENDER_DISTANCE};
 use crate::voxel::loading::{
     ChunkLoadQueue, ChunkReplacementBuffer, CompletedChunk, ComputeMeshTask, PlaceholderEntities,
 };
@@ -33,7 +33,7 @@ fn is_chunk_in_frustum(chunk_pos: &ChunkPos, camera_transform: &Transform) -> bo
     // 计算区块中心点（世界坐标）
     let chunk_center = Vec3::new(
         origin.x as f32 + CHUNK_SIZE as f32 / 2.0,
-        CHUNK_HEIGHT as f32 / 2.0,
+        origin.y as f32 + CHUNK_SIZE as f32 / 2.0,
         origin.z as f32 + CHUNK_SIZE as f32 / 2.0,
     );
 
@@ -81,7 +81,11 @@ pub fn update_chunk_loading(
     };
 
     let camera_pos = camera_transform.translation;
-    let center_chunk = ChunkPos::from_world_pos(camera_pos.x as i32, camera_pos.z as i32);
+    let center_chunk = ChunkPos::from_world_pos(
+        camera_pos.x as i32,
+        camera_pos.y as i32,
+        camera_pos.z as i32,
+    );
 
     // 收集正在处理中的区块
     let pending_chunks: Vec<ChunkPos> = pending_query.iter().map(|t| t.chunk_pos).collect();
@@ -89,28 +93,38 @@ pub fn update_chunk_loading(
     // 收集需要加载的区块
     let mut chunks_to_add = Vec::new();
     for dx in -RENDER_DISTANCE..=RENDER_DISTANCE {
-        for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
-            let chunk_pos = ChunkPos::new(center_chunk.x + dx, center_chunk.z + dz);
+        for dy in -VERTICAL_RENDER_DISTANCE..=VERTICAL_RENDER_DISTANCE {
+            for dz in -RENDER_DISTANCE..=RENDER_DISTANCE {
+                let chunk_pos = ChunkPos::new(
+                    center_chunk.x + dx,
+                    center_chunk.y + dy,
+                    center_chunk.z + dz,
+                );
 
-            // 优化: 视锥剔除 - 跳过视野外的区块
-            if !is_chunk_in_frustum(&chunk_pos, camera_transform) {
-                continue;
-            }
+                // 优化: 视锥剔除 - 跳过视野外的区块
+                if !is_chunk_in_frustum(&chunk_pos, camera_transform) {
+                    continue;
+                }
 
-            if !world.loaded_chunks.contains_key(&chunk_pos)
-                && !world.chunks.contains_key(&chunk_pos)
-                && !queue.to_load.contains(&chunk_pos)
-                && !pending_chunks.contains(&chunk_pos)
-            {
-                chunks_to_add.push(chunk_pos);
+                if !world.loaded_chunks.contains_key(&chunk_pos)
+                    && !world.chunks.contains_key(&chunk_pos)
+                    && !queue.to_load.contains(&chunk_pos)
+                    && !pending_chunks.contains(&chunk_pos)
+                {
+                    chunks_to_add.push(chunk_pos);
+                }
             }
         }
     }
 
     // 按距离排序（距离近的优先）
     chunks_to_add.sort_by(|a, b| {
-        let dist_a = (a.x - center_chunk.x).pow(2) + (a.z - center_chunk.z).pow(2);
-        let dist_b = (b.x - center_chunk.x).pow(2) + (b.z - center_chunk.z).pow(2);
+        let dist_a = (a.x - center_chunk.x).pow(2)
+            + (a.y - center_chunk.y).pow(2)
+            + (a.z - center_chunk.z).pow(2);
+        let dist_b = (b.x - center_chunk.x).pow(2)
+            + (b.y - center_chunk.y).pow(2)
+            + (b.z - center_chunk.z).pow(2);
         dist_a.cmp(&dist_b)
     });
 
@@ -125,16 +139,28 @@ pub fn update_chunk_loading(
 
     // 重新排序整个队列（玩家移动后需要重新排序）
     queue.to_load.sort_by(|a, b| {
-        let dist_a = (a.x - center_chunk.x).pow(2) + (a.z - center_chunk.z).pow(2);
-        let dist_b = (b.x - center_chunk.x).pow(2) + (b.z - center_chunk.z).pow(2);
+        let dist_a = (a.x - center_chunk.x).pow(2)
+            + (a.y - center_chunk.y).pow(2)
+            + (a.z - center_chunk.z).pow(2);
+        let dist_b = (b.x - center_chunk.x).pow(2)
+            + (b.y - center_chunk.y).pow(2)
+            + (b.z - center_chunk.z).pow(2);
         dist_a.cmp(&dist_b)
     });
 
     // 查找需要卸载的区块（超出渲染距离+1）
-    for &chunk_pos in world.loaded_chunks.keys() {
+    // 修复：检查所有chunk（包括空mesh的），而不只是loaded_chunks
+    for &chunk_pos in world.chunks.keys() {
         let dx = (chunk_pos.x - center_chunk.x).abs();
+        let dy = (chunk_pos.y - center_chunk.y).abs();
         let dz = (chunk_pos.z - center_chunk.z).abs();
-        if dx > RENDER_DISTANCE + 1 || dz > RENDER_DISTANCE + 1 {
+
+        // 基本距离检查
+        let out_of_range = dx > RENDER_DISTANCE + 1
+            || dy > VERTICAL_RENDER_DISTANCE + 1
+            || dz > RENDER_DISTANCE + 1;
+
+        if out_of_range {
             if !queue.to_unload.contains(&chunk_pos) {
                 queue.to_unload.push(chunk_pos);
             }
@@ -149,13 +175,37 @@ pub fn spawn_batch_placeholders(
     materials: Res<ChunkMaterials>,
     mut queue: ResMut<ChunkLoadQueue>,
     mut placeholders: ResMut<PlaceholderEntities>,
+    camera_query: Query<&Transform, With<Camera3d>>,
 ) {
     if queue.pending_placeholders.is_empty() {
         return;
     }
 
-    // 批量创建所有待创建的占位符
-    let chunks_to_create: Vec<_> = queue.pending_placeholders.drain(..).collect();
+    // 获取摄像机位置用于清理不需要的占位符
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+    let camera_pos = camera_transform.translation;
+    let center_chunk = ChunkPos::from_world_pos(
+        camera_pos.x as i32,
+        camera_pos.y as i32,
+        camera_pos.z as i32,
+    );
+
+    // 批量创建所有待创建的占位符（并过滤掉不需要的）
+    let chunks_to_create: Vec<_> = queue
+        .pending_placeholders
+        .drain(..)
+        .filter(|chunk_pos| {
+            // 只创建仍然在范围内且在视锥内的占位符
+            let dx = (chunk_pos.x - center_chunk.x).abs();
+            let dy = (chunk_pos.y - center_chunk.y).abs();
+            let dz = (chunk_pos.z - center_chunk.z).abs();
+            let in_range = dx <= RENDER_DISTANCE && dy <= VERTICAL_RENDER_DISTANCE && dz <= RENDER_DISTANCE;
+            let in_frustum = is_chunk_in_frustum(chunk_pos, camera_transform);
+            in_range && in_frustum
+        })
+        .collect();
 
     // 创建共享的占位符网格（所有区块使用同一个网格）
     let placeholder_mesh = create_placeholder_mesh();
@@ -168,7 +218,11 @@ pub fn spawn_batch_placeholders(
             .spawn((
                 Mesh3d(placeholder_handle.clone()),
                 MeshMaterial3d(materials.transparent.clone()),
-                Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
+                Transform::from_translation(Vec3::new(
+                    origin.x as f32,
+                    origin.y as f32,
+                    origin.z as f32,
+                )),
                 ChunkMarker { pos: chunk_pos },
             ))
             .id();
@@ -294,6 +348,20 @@ pub fn apply_chunk_replacements(
         commands.entity(completed.placeholder_entity).despawn();
         placeholders.map.remove(&completed.chunk_pos);
 
+        // 优化：检查mesh是否为空（没有顶点/索引）
+        // 空mesh不创建entity，避免无用的drawcall
+        let has_geometry = completed.mesh.indices().map_or(false, |indices| {
+            match indices {
+                bevy::mesh::Indices::U16(v) => !v.is_empty(),
+                bevy::mesh::Indices::U32(v) => !v.is_empty(),
+            }
+        });
+
+        if !has_geometry {
+            // 空mesh：不创建渲染实体，只存储数据
+            continue;
+        }
+
         // 创建真实区块渲染实体（替换占位符）
         let mesh_handle = meshes.add(completed.mesh);
         let origin = completed.chunk_pos.world_origin();
@@ -302,7 +370,11 @@ pub fn apply_chunk_replacements(
             .spawn((
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(materials.opaque.clone()),
-                Transform::from_translation(Vec3::new(origin.x as f32, 0.0, origin.z as f32)),
+                Transform::from_translation(Vec3::new(
+                    origin.x as f32,
+                    origin.y as f32,
+                    origin.z as f32,
+                )),
                 ChunkMarker {
                     pos: completed.chunk_pos,
                 },
@@ -312,6 +384,48 @@ pub fn apply_chunk_replacements(
         world
             .loaded_chunks
             .insert(completed.chunk_pos, chunk_entity);
+    }
+}
+
+/// 清理孤儿占位符（那些chunk已经生成但占位符还在的）
+pub fn cleanup_orphan_placeholders(
+    mut commands: Commands,
+    mut placeholders: ResMut<PlaceholderEntities>,
+    world: Res<VoxelWorld>,
+    queue: Res<ChunkLoadQueue>,
+    pending_query: Query<&ComputeMeshTask>,
+) {
+    // 收集所有应该有占位符的chunk位置
+    let mut should_have_placeholder = std::collections::HashSet::new();
+
+    // 正在加载队列中的
+    for pos in &queue.to_load {
+        should_have_placeholder.insert(*pos);
+    }
+
+    // 正在处理的任务
+    for task in pending_query.iter() {
+        should_have_placeholder.insert(task.chunk_pos);
+    }
+
+    // 待创建的
+    for pos in &queue.pending_placeholders {
+        should_have_placeholder.insert(*pos);
+    }
+
+    // 找出孤儿占位符（在map中但不应该存在的）
+    let orphans: Vec<_> = placeholders
+        .map
+        .keys()
+        .filter(|pos| !should_have_placeholder.contains(pos))
+        .copied()
+        .collect();
+
+    // 清理孤儿占位符
+    for pos in orphans {
+        if let Some(entity) = placeholders.map.remove(&pos) {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
@@ -349,6 +463,9 @@ pub fn process_chunk_unload(
         if let Some(entity) = placeholders.map.remove(&chunk_pos) {
             commands.entity(entity).despawn();
         }
+
+        // 从加载队列中移除（如果存在）
+        queue.to_load.retain(|&pos| pos != chunk_pos);
 
         // 从替换缓冲区中移除该区块（如果存在）
         buffer.completed.retain(|c| c.chunk_pos != chunk_pos);

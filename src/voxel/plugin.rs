@@ -7,8 +7,8 @@ use crate::voxel::loading::{ChunkLoadQueue, ChunkReplacementBuffer, PlaceholderE
 use crate::voxel::materials::setup_materials;
 use crate::voxel::seed::WorldSeed;
 use crate::voxel::systems::{
-    apply_chunk_replacements, handle_completed_mesh_tasks, process_chunk_unload,
-    spawn_batch_placeholders, spawn_mesh_tasks, update_chunk_loading,
+    apply_chunk_replacements, cleanup_orphan_placeholders, handle_completed_mesh_tasks,
+    process_chunk_unload, spawn_batch_placeholders, spawn_mesh_tasks, update_chunk_loading,
 };
 
 /// 体素系统插件 - 负责注册体素相关的资源和系统
@@ -31,6 +31,7 @@ impl Plugin for VoxelPlugin {
                     handle_completed_mesh_tasks,
                     apply_chunk_replacements,
                     process_chunk_unload,
+                    cleanup_orphan_placeholders,
                 )
                     .chain(),
             );

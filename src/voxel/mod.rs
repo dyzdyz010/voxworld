@@ -33,7 +33,7 @@ pub mod voxel_kind;
 pub use biome::Biome;
 pub use chunk::{ChunkData, ChunkMarker, ChunkPos, VoxelWorld};
 pub use components::Voxel;
-pub use constants::{CHUNK_HEIGHT, CHUNK_SIZE, RENDER_DISTANCE};
+pub use constants::{CHUNK_SIZE, RENDER_DISTANCE, VERTICAL_RENDER_DISTANCE};
 pub use loading::{
     ChunkLoadQueue, ChunkReplacementBuffer, CompletedChunk, ComputeMeshTask, MeshBuildInput,
     NeighborEdges, PlaceholderEntities,

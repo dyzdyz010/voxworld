@@ -397,13 +397,22 @@ fn update_debug_overlay(
     };
 
     let pos = transform.translation;
-    let chunk_pos = crate::voxel::ChunkPos::from_world_pos(pos.x as i32, pos.z as i32);
+    let chunk_pos = crate::voxel::ChunkPos::from_world_pos(
+        pos.x as i32,
+        pos.y as i32,
+        pos.z as i32,
+    );
 
     // Get FPS from diagnostics
     let fps = diagnostics
         .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|fps| fps.smoothed())
         .unwrap_or(0.0);
+
+    // 计算渲染统计
+    let rendered_chunks = world.loaded_chunks.len(); // 实际渲染的chunk数（有mesh的）
+    let total_chunks = world.chunks.len(); // 所有生成的chunk数
+    let culled_chunks = total_chunks - rendered_chunks; // 被剔除的chunk数（空气或完全被包围）
 
     text.0 = format!(
         "Voxworld Debug (F3 to toggle)\n\
@@ -412,22 +421,26 @@ fn update_debug_overlay(
         Frame Time: {:.2}ms\n\
         \n\
         Position: {:.2}, {:.2}, {:.2}\n\
-        Chunk: ({}, {})\n\
+        Chunk: ({}, {}, {})\n\
         \n\
         Rotation:\n\
           Yaw: {:.2}°\n\
           Pitch: {:.2}°\n\
         \n\
         World:\n\
-          Loaded Chunks: {}\n\
-          Total Chunks: {}",
+          Rendered Chunks: {} (with geometry)\n\
+          Culled Chunks: {} (empty/enclosed)\n\
+          Total Chunks: {}\n\
+          Draw Calls: ~{}",
         fps,
         time.delta_secs() * 1000.0,
         pos.x, pos.y, pos.z,
-        chunk_pos.x, chunk_pos.z,
+        chunk_pos.x, chunk_pos.y, chunk_pos.z,
         angles.yaw.to_degrees(),
         angles.pitch.to_degrees(),
-        world.loaded_chunks.len(),
-        world.chunks.len(),
+        rendered_chunks,
+        culled_chunks,
+        total_chunks,
+        rendered_chunks, // 估计的drawcall数（每个chunk约1个）
     );
 }

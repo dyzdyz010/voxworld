@@ -20,6 +20,10 @@ pub struct NeighborEdges {
     pub pos_x: Option<Vec<VoxelKind>>,
     /// -X方向相邻区块的X=CHUNK_SIZE-1面
     pub neg_x: Option<Vec<VoxelKind>>,
+    /// +Y方向相邻区块的Y=0面
+    pub pos_y: Option<Vec<VoxelKind>>,
+    /// -Y方向相邻区块的Y=CHUNK_SIZE-1面
+    pub neg_y: Option<Vec<VoxelKind>>,
     /// +Z方向相邻区块的Z=0面
     pub pos_z: Option<Vec<VoxelKind>>,
     /// -Z方向相邻区块的Z=CHUNK_SIZE-1面
@@ -32,27 +36,34 @@ impl NeighborEdges {
         Self {
             pos_x: world
                 .chunks
-                .get(&ChunkPos::new(center.x + 1, center.z))
+                .get(&ChunkPos::new(center.x + 1, center.y, center.z))
                 .map(|c| Self::extract_x_face(c, 0)),
             neg_x: world
                 .chunks
-                .get(&ChunkPos::new(center.x - 1, center.z))
+                .get(&ChunkPos::new(center.x - 1, center.y, center.z))
                 .map(|c| Self::extract_x_face(c, CHUNK_SIZE - 1)),
+            pos_y: world
+                .chunks
+                .get(&ChunkPos::new(center.x, center.y + 1, center.z))
+                .map(|c| Self::extract_y_face(c, 0)),
+            neg_y: world
+                .chunks
+                .get(&ChunkPos::new(center.x, center.y - 1, center.z))
+                .map(|c| Self::extract_y_face(c, CHUNK_SIZE - 1)),
             pos_z: world
                 .chunks
-                .get(&ChunkPos::new(center.x, center.z + 1))
+                .get(&ChunkPos::new(center.x, center.y, center.z + 1))
                 .map(|c| Self::extract_z_face(c, 0)),
             neg_z: world
                 .chunks
-                .get(&ChunkPos::new(center.x, center.z - 1))
+                .get(&ChunkPos::new(center.x, center.y, center.z - 1))
                 .map(|c| Self::extract_z_face(c, CHUNK_SIZE - 1)),
         }
     }
 
     fn extract_x_face(chunk: &ChunkData, x: i32) -> Vec<VoxelKind> {
-        use crate::voxel::constants::CHUNK_HEIGHT;
-        let mut face = Vec::with_capacity((CHUNK_HEIGHT * CHUNK_SIZE) as usize);
-        for y in 0..CHUNK_HEIGHT {
+        let mut face = Vec::with_capacity((CHUNK_SIZE * CHUNK_SIZE) as usize);
+        for y in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 face.push(chunk.get(x, y, z));
             }
@@ -60,10 +71,19 @@ impl NeighborEdges {
         face
     }
 
+    fn extract_y_face(chunk: &ChunkData, y: i32) -> Vec<VoxelKind> {
+        let mut face = Vec::with_capacity((CHUNK_SIZE * CHUNK_SIZE) as usize);
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                face.push(chunk.get(x, y, z));
+            }
+        }
+        face
+    }
+
     fn extract_z_face(chunk: &ChunkData, z: i32) -> Vec<VoxelKind> {
-        use crate::voxel::constants::CHUNK_HEIGHT;
-        let mut face = Vec::with_capacity((CHUNK_HEIGHT * CHUNK_SIZE) as usize);
-        for y in 0..CHUNK_HEIGHT {
+        let mut face = Vec::with_capacity((CHUNK_SIZE * CHUNK_SIZE) as usize);
+        for y in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 face.push(chunk.get(x, y, z));
             }
@@ -82,6 +102,14 @@ impl NeighborEdges {
                 .neg_x
                 .as_ref()
                 .map(|f| f[(local_pos.y * CHUNK_SIZE + local_pos.z) as usize]),
+            (0, 1, 0) if local_pos.y == CHUNK_SIZE - 1 => self
+                .pos_y
+                .as_ref()
+                .map(|f| f[(local_pos.z * CHUNK_SIZE + local_pos.x) as usize]),
+            (0, -1, 0) if local_pos.y == 0 => self
+                .neg_y
+                .as_ref()
+                .map(|f| f[(local_pos.z * CHUNK_SIZE + local_pos.x) as usize]),
             (0, 0, 1) if local_pos.z == CHUNK_SIZE - 1 => self
                 .pos_z
                 .as_ref()
@@ -108,6 +136,42 @@ pub struct MeshBuildInput {
     pub voxels: Arc<Vec<VoxelKind>>,
     /// 相邻区块的边界体素数据
     pub neighbor_edges: NeighborEdges,
+}
+
+impl MeshBuildInput {
+    /// 检查该chunk是否完全被不透明的相邻chunk包围
+    /// 如果被完全包围，可以跳过网格生成（优化）
+    pub fn is_fully_enclosed(&self) -> bool {
+        // 检查所有6个方向的相邻chunk是否都存在且完全不透明
+        let has_all_neighbors = self.neighbor_edges.pos_x.is_some()
+            && self.neighbor_edges.neg_x.is_some()
+            && self.neighbor_edges.pos_y.is_some()
+            && self.neighbor_edges.neg_y.is_some()
+            && self.neighbor_edges.pos_z.is_some()
+            && self.neighbor_edges.neg_z.is_some();
+
+        if !has_all_neighbors {
+            return false;
+        }
+
+        // 检查相邻chunk的边界面是否完全不透明
+        let all_opaque = [
+            &self.neighbor_edges.pos_x,
+            &self.neighbor_edges.neg_x,
+            &self.neighbor_edges.pos_y,
+            &self.neighbor_edges.neg_y,
+            &self.neighbor_edges.pos_z,
+            &self.neighbor_edges.neg_z,
+        ]
+        .iter()
+        .all(|edge| {
+            edge.as_ref()
+                .map(|face| face.iter().all(|&kind| !kind.is_transparent()))
+                .unwrap_or(false)
+        });
+
+        all_opaque
+    }
 }
 
 /// 正在进行的网格生成任务

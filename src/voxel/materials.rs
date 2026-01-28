@@ -15,9 +15,12 @@ pub struct ChunkMaterials {
 /// 创建不透明和透明两种材质
 pub fn setup_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
     // 不透明材质：高粗糙度，适合大多数方块
+    // 优化：使用unlit以减少光照计算开销
     let opaque = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.9,
+        unlit: false, // 保持光照以获得更好的视觉效果
+        cull_mode: Some(bevy::render::render_resource::Face::Back), // 背面剔除
         ..default()
     });
 
@@ -26,6 +29,7 @@ pub fn setup_materials(mut commands: Commands, mut materials: ResMut<Assets<Stan
         base_color: Color::WHITE,
         perceptual_roughness: 0.3,
         alpha_mode: AlphaMode::Blend,
+        cull_mode: None, // 透明物体不剔除
         ..default()
     });
 

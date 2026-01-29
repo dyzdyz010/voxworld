@@ -2,7 +2,7 @@ use bevy::anti_alias::fxaa::Fxaa;
 use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
-use bevy::light::{light_consts::lux, AtmosphereEnvironmentMapLight, VolumetricFog, VolumetricLight, CascadeShadowConfigBuilder};
+use bevy::light::{AtmosphereEnvironmentMapLight, VolumetricFog};
 use bevy::pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium, ScreenSpaceReflections};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -70,26 +70,6 @@ fn setup_player(
         Msaa::Off,
         Fxaa::default(),
         ScreenSpaceReflections::default(),
-    ));
-
-    // Configure cascade shadow map
-    let cascade_shadow_config = CascadeShadowConfigBuilder {
-        first_cascade_far_bound: 30.0,
-        maximum_distance: 500.0,
-        ..default()
-    }
-    .build();
-
-    // Sun - using RAW_SUNLIGHT for proper atmospheric scattering
-    commands.spawn((
-        DirectionalLight {
-            illuminance: lux::RAW_SUNLIGHT,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(50.0, 80.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
-        VolumetricLight,
-        cascade_shadow_config,
     ));
 
     cursor_options.grab_mode = CursorGrabMode::Locked;

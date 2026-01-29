@@ -1,24 +1,19 @@
+mod celestial;
 mod player;
 mod raycast;
 mod ui;
 mod voxel;
 
-use std::f32::consts::PI;
-
+use bevy::camera::Exposure;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::input::keyboard::KeyCode;
 use bevy::pbr::{AtmosphereMode, AtmosphereSettings};
 use bevy::prelude::*;
-use bevy::camera::Exposure;
+use celestial::{CelestialPlugin, CelestialSettings};
 use player::PlayerPlugin;
 use raycast::RaycastPlugin;
 use ui::UiPlugin;
 use voxel::{VoxelPlugin, WorldSeed};
-
-#[derive(Resource, Default)]
-struct GameState {
-    paused: bool,
-}
 
 fn main() {
     // Parse seed from command line or environment variable
@@ -26,7 +21,6 @@ fn main() {
 
     App::new()
         .insert_resource(seed)
-        .insert_resource(GameState::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Voxworld".to_string(),
@@ -37,12 +31,13 @@ fn main() {
         .add_plugins((
             VoxelPlugin,
             PlayerPlugin,
+            CelestialPlugin,
             RaycastPlugin,
             UiPlugin,
             FrameTimeDiagnosticsPlugin::default(),
         ))
         .add_systems(Startup, print_controls)
-        .add_systems(Update, (dynamic_scene, atmosphere_controls))
+        .add_systems(Update, atmosphere_controls)
         .run();
 }
 
@@ -58,14 +53,14 @@ fn print_controls() {
     println!("=== Atmosphere Controls ===");
     println!("  1          - Switch to lookup texture rendering method");
     println!("  2          - Switch to raymarched rendering method");
-    println!("  P          - Pause/Resume sun motion");
+    println!("  P          - Pause/Resume celestial motion (sun & moon)");
     println!("  Up/Down    - Increase/Decrease exposure");
 }
 
 fn atmosphere_controls(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut atmosphere_settings: Query<&mut AtmosphereSettings>,
-    mut game_state: ResMut<GameState>,
+    mut celestial_settings: ResMut<CelestialSettings>,
     mut camera_exposure: Query<&mut Exposure, With<Camera3d>>,
     time: Res<Time>,
 ) {
@@ -84,8 +79,8 @@ fn atmosphere_controls(
     }
 
     if keyboard_input.just_pressed(KeyCode::KeyP) {
-        game_state.paused = !game_state.paused;
-        println!("Sun motion: {}", if game_state.paused { "PAUSED" } else { "RESUMED" });
+        celestial_settings.paused = !celestial_settings.paused;
+        println!("Celestial motion: {}", if celestial_settings.paused { "PAUSED" } else { "RESUMED" });
     }
 
     if keyboard_input.pressed(KeyCode::ArrowUp) {
@@ -98,18 +93,6 @@ fn atmosphere_controls(
         for mut exposure in &mut camera_exposure {
             exposure.ev100 += time.delta_secs() * 2.0;
         }
-    }
-}
-
-fn dynamic_scene(
-    mut suns: Query<&mut Transform, With<DirectionalLight>>,
-    time: Res<Time>,
-    game_state: Res<GameState>,
-) {
-    // Only rotate the sun if motion is not paused
-    if !game_state.paused {
-        suns.iter_mut()
-            .for_each(|mut tf| tf.rotate_x(-time.delta_secs() * PI / 10.0));
     }
 }
 

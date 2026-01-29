@@ -11,7 +11,8 @@
       "Bash(for file in *.rs)",
       "Bash(done)",
       "Bash(sort:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(dir:*)"
     ]
   }
 }

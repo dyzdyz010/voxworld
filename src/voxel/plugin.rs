@@ -3,6 +3,7 @@
 use bevy::prelude::*;
 
 use crate::voxel::chunk::VoxelWorld;
+use crate::voxel::domains::DomainPlugin;
 use crate::voxel::loading::{ChunkLoadQueue, ChunkReplacementBuffer, PlaceholderEntities};
 use crate::voxel::materials::setup_materials;
 use crate::voxel::seed::WorldSeed;
@@ -34,6 +35,8 @@ impl Plugin for VoxelPlugin {
                     cleanup_orphan_placeholders,
                 )
                     .chain(),
-            );
+            )
+            // 注册领域系统（温度、湿度、燃烧等物理模拟）
+            .add_plugins(DomainPlugin);
     }
 }

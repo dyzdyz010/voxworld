@@ -1,9 +1,12 @@
 //! 区块数据结构
 
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::voxel::change::BlockChange;
 use crate::voxel::constants::CHUNK_SIZE;
+use crate::voxel::domains::thermal::ThermalState;
+use crate::voxel::flags::VoxelFlags;
 use crate::voxel::voxel_kind::VoxelKind;
 
 /// 区块坐标 - 用于标识世界中区块的位置
@@ -60,22 +63,83 @@ pub struct ChunkMarker {
     pub pos: ChunkPos,
 }
 
-/// 区块数据 - 存储区块内所有体素的类型数据
+/// 区块数据 - 存储区块内所有体素的类型数据和状态
 pub struct ChunkData {
-    /// 体素数组，大小为 CHUNK_SIZE × CHUNK_HEIGHT × CHUNK_SIZE
+    // === 基础数据 ===
+    /// 体素数组，大小为 CHUNK_SIZE³ = 4096
     /// 使用一维数组存储三维数据，通过 index() 函数计算索引
     pub voxels: Vec<VoxelKind>,
     /// 脏标记 - 标识区块是否被修改，需要重新生成网格
     pub is_dirty: bool,
+
+    // === 通用状态（轻量，全量存储）===
+    /// 每个方块的状态标志位
+    pub flags: Vec<VoxelFlags>,
+    /// 每个方块的变体/阶段（水位、生长阶段等，0-255）
+    pub variant: Vec<u8>,
+
+    // === 专用状态（稀疏，按需分配）===
+    /// 温度场状态（稀疏存储）
+    pub thermal_state: Option<ThermalState>,
+    // TODO: 后续添加
+    // pub moisture_state: Option<MoistureState>,
+    // pub combustion_state: Option<CombustionState>,
+    // pub phase_state: Option<PhaseState>,
+
+    // === 活跃集合（驱动计算）===
+    /// 活跃的温度变化方块索引
+    pub active_thermal: HashSet<usize>,
+    /// 正在燃烧的方块索引
+    pub active_burning: HashSet<usize>,
+    /// 正在冻结的方块索引
+    pub active_freezing: HashSet<usize>,
+    /// 正在融化的方块索引
+    pub active_melting: HashSet<usize>,
+
+    // === 渲染与同步 ===
+    /// 变化的方块索引列表（用于增量更新）
+    pub dirty_blocks: Vec<usize>,
+    /// 需要重建网格
+    pub needs_remesh: bool,
+    /// 变更日志（用于网络同步/存档）
+    pub changes: Vec<BlockChange>,
 }
 
 impl ChunkData {
+    /// 区块体素总数
+    pub const VOXEL_COUNT: usize = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize;
+
     /// 创建一个空的区块数据，所有体素初始化为空气
     pub fn new() -> Self {
         Self {
-            voxels: vec![VoxelKind::Air; (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize],
+            voxels: vec![VoxelKind::Air; Self::VOXEL_COUNT],
             is_dirty: true,
+            flags: vec![VoxelFlags::NONE; Self::VOXEL_COUNT],
+            variant: vec![0; Self::VOXEL_COUNT],
+            thermal_state: None,
+            active_thermal: HashSet::new(),
+            active_burning: HashSet::new(),
+            active_freezing: HashSet::new(),
+            active_melting: HashSet::new(),
+            dirty_blocks: Vec::new(),
+            needs_remesh: false,
+            changes: Vec::new(),
         }
+    }
+
+    /// 清空变更日志
+    pub fn clear_changes(&mut self) {
+        self.dirty_blocks.clear();
+        self.changes.clear();
+        self.needs_remesh = false;
+    }
+
+    /// 获取活跃方块总数（所有领域）
+    pub fn active_count(&self) -> usize {
+        self.active_thermal.len()
+            + self.active_burning.len()
+            + self.active_freezing.len()
+            + self.active_melting.len()
     }
 
     /// 将三维坐标转换为一维数组索引
@@ -121,6 +185,25 @@ impl ChunkData {
 impl Default for ChunkData {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for ChunkData {
+    fn clone(&self) -> Self {
+        Self {
+            voxels: self.voxels.clone(),
+            is_dirty: self.is_dirty,
+            flags: self.flags.clone(),
+            variant: self.variant.clone(),
+            thermal_state: self.thermal_state.clone(),
+            active_thermal: self.active_thermal.clone(),
+            active_burning: self.active_burning.clone(),
+            active_freezing: self.active_freezing.clone(),
+            active_melting: self.active_melting.clone(),
+            dirty_blocks: self.dirty_blocks.clone(),
+            needs_remesh: self.needs_remesh,
+            changes: self.changes.clone(),
+        }
     }
 }
 

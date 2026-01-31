@@ -12,7 +12,9 @@
       "Bash(done)",
       "Bash(sort:*)",
       "Bash(wc:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(cargo test:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

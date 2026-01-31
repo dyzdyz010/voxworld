@@ -14,11 +14,17 @@
 //! - **materials**: 材质系统（不透明/透明材质）
 //! - **components**: 体素相关组件
 //! - **plugin**: Bevy插件
+//! - **flags**: 方块状态标志位系统
+//! - **change**: 方块变更记录系统
+//! - **domains**: 领域模块系统（温度、湿度、燃烧、相变等）
 
 pub mod biome;
+pub mod change;
 pub mod chunk;
 pub mod components;
 pub mod constants;
+pub mod domains;
+pub mod flags;
 pub mod loading;
 pub mod materials;
 pub mod mesh;
@@ -31,9 +37,12 @@ pub mod voxel_kind;
 
 // 重新导出常用类型，方便外部使用
 pub use biome::Biome;
+pub use change::BlockChange;
 pub use chunk::{ChunkData, ChunkMarker, ChunkPos, VoxelWorld};
 pub use components::Voxel;
 pub use constants::{CHUNK_SIZE, RENDER_DISTANCE, VERTICAL_RENDER_DISTANCE};
+pub use domains::{command::DomainCommand, DomainPlugin, SimulationSet};
+pub use flags::VoxelFlags;
 pub use loading::{
     ChunkLoadQueue, ChunkReplacementBuffer, CompletedChunk, ComputeMeshTask, MeshBuildInput,
     NeighborEdges, PlaceholderEntities,

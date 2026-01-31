@@ -336,13 +336,10 @@ pub fn apply_chunk_replacements(
     // 批量替换所有完成的区块
     for completed in buffer.completed.drain(..) {
         // 存储区块数据
-        world.chunks.insert(
-            completed.chunk_pos,
-            ChunkData {
-                voxels: completed.voxels,
-                is_dirty: false,
-            },
-        );
+        let mut chunk_data = ChunkData::new();
+        chunk_data.voxels = completed.voxels;
+        chunk_data.is_dirty = false;
+        world.chunks.insert(completed.chunk_pos, chunk_data);
 
         // 移除蓝色占位符实体
         commands.entity(completed.placeholder_entity).despawn();

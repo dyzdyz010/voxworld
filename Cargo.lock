@@ -4714,6 +4714,7 @@ name = "voxworld"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bitflags 2.10.0",
  "futures-lite",
  "noise",
 ]
